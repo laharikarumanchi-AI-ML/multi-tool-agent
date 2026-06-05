@@ -261,3 +261,21 @@ class TestDatetimeTool:
         from multitool.tools.datetime_tool import datetime_tool
         result = datetime_tool("invalid_op", "2024")
         assert "error" in result.lower() or "unknown" in result.lower()
+
+
+class TestUnitConvert:
+
+    def test_mph_to_ms(self):
+        from multitool.tools.unit_convert import unit_convert
+        result = float(unit_convert(60.0, "mile/hour", "meter/second"))
+        assert abs(result - 26.82) < 0.1
+
+    def test_km_to_mile(self):
+        from multitool.tools.unit_convert import unit_convert
+        result = float(unit_convert(100.0, "kilometer", "mile"))
+        assert abs(result - 62.14) < 0.1
+
+    def test_unknown_unit_returns_error(self):
+        from multitool.tools.unit_convert import unit_convert
+        result = unit_convert(1.0, "florblegorps", "meter")
+        assert "error" in result.lower() or "undefined" in result.lower()
