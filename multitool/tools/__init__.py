@@ -29,3 +29,30 @@ def _py_to_json_type(hint) -> str:
     if hint in PY_TO_JSON_TYPE:
         return PY_TO_JSON_TYPE[hint]
     raise UnsupportedToolTypeError(f"Unsupported tool parameter type: {hint!r}")
+
+
+def tool(fn: Callable) -> Callable:
+    """Decorator. Registers fn in TOOL_REGISTRY with auto-generated JSON Schema."""
+    hints = get_type_hints(fn)
+    sig = inspect.signature(fn)
+    required = [
+        name for name, param in sig.parameters.items()
+        if param.default is inspect.Parameter.empty
+    ]
+    schema = {
+        "type": "function",
+        "function": {
+            "name": fn.__name__,
+            "description": inspect.getdoc(fn) or "",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    name: {"type": _py_to_json_type(hints[name])}
+                    for name in sig.parameters
+                },
+                "required": required,
+            },
+        },
+    }
+    TOOL_REGISTRY[fn.__name__] = {"fn": fn, "schema": schema}
+    return fn
