@@ -109,15 +109,22 @@ GROQ_API_KEY=gsk_xxxxxxxxxxxxxxxxxxxxxxxx
 GEMINI_API_KEY=AQ.xxxxxxxxxxxxxxxxxxxxxxxx
 ```
 
-- [ ] **Create venv + activate** before any pytest commands:
+- [ ] **Create venv** (do NOT rely on `source .venv/bin/activate` persisting across Bash calls):
 
 ```bash
 cd /Users/anilkumar/multi-tool-agent
 python3.11 -m venv .venv
-source .venv/bin/activate
 ```
 
-The implementer subagent will operate inside this venv. All `pip install` and `pytest` commands assume it's active.
+**Critical for the implementer subagent**: each `Bash` tool invocation is a fresh shell — `source .venv/bin/activate` from one call does NOT persist to the next. Three options for every command that needs the venv's Python:
+
+| Option | Example | When to use |
+|---|---|---|
+| **A. Use venv binaries directly** (preferred) | `.venv/bin/pytest -v` and `.venv/bin/pip install -e ".[dev,demo]"` | Most pytest / pip commands |
+| **B. Inline activation** | `source .venv/bin/activate && pytest -v && deactivate` | When a tool needs the activated env (rare; numexpr/pint don't) |
+| **C. PATH prefix** | `PATH=.venv/bin:$PATH pytest -v` | Multi-command sequences |
+
+Throughout this plan, commands shown as `pytest ...` or `pip install ...` should be prefixed with `.venv/bin/` by the implementer (e.g., `.venv/bin/pytest -v`). Don't rely on a previously-activated shell.
 
 ---
 
@@ -1940,7 +1947,7 @@ In `multitool/llm_client.py`, find the `class GroqClient:` block and add this me
         Returns a ToolResponse — either content (final answer) or tool_calls
         (parsed arguments dict, not JSON string)."""
         payload = {
-            "model": self.model,
+            "model": self._model,
             "messages": messages,
             "tools": tools,
             "tool_choice": "auto",
@@ -1951,10 +1958,12 @@ In `multitool/llm_client.py`, find the `class GroqClient:` block and add this me
         # Reuse the existing chat()'s retry loop pattern. For now, do a
         # straightforward call; the retry behavior is shared via the underlying
         # _post helper if/when we refactor. Here we inline a simple version.
+        # NOTE: attrs are _api_key and _model (underscore-prefixed) on the
+        # existing GroqClient — not api_key/model. Don't drift.
         for attempt in range(self.MAX_ATTEMPTS):
             response = requests.post(
                 self.URL,
-                headers={"Authorization": f"Bearer {self.api_key}"},
+                headers={"Authorization": f"Bearer {self._api_key}"},
                 json=payload,
                 timeout=60,
             )
@@ -2052,8 +2061,9 @@ In `multitool/llm_client.py`, find `class GeminiClient:` and add this method:
         code can use call.id uniformly."""
         from uuid import uuid4
 
-        # Gemini's tools format uses functionDeclarations
-        gemini_tools = [{"functionDeclarations": [t["function"]] for t in tools}] if tools else []
+        # Gemini's tools format uses functionDeclarations.
+        # NOTE: attrs are _api_key and _model (underscore-prefixed) on the
+        # existing GeminiClient — not api_key/model. Don't drift.
         if not tools:
             gemini_tools = []
         else:
@@ -2068,8 +2078,8 @@ In `multitool/llm_client.py`, find `class GeminiClient:` and add this method:
         for attempt in range(self.MAX_ATTEMPTS):
             self._throttle()
             response = requests.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent",
-                params={"key": self.api_key},
+                f"https://generativelanguage.googleapis.com/v1beta/models/{self._model}:generateContent",
+                params={"key": self._api_key},
                 json=payload,
                 timeout=60,
             )
@@ -2881,16 +2891,16 @@ Save to `multitool/eval/test_set.jsonl`:
 
 ```jsonl
 {"id":"q01","question":"What is the population of Chicago divided by the US GDP per capita in 2023?","gold_answer":32.6,"tolerance":1.0,"answer_kind":"numeric","expected_tools":["tavily_search","tavily_search","calculator"],"category":"search-then-compute","difficulty":"medium"}
-{"id":"q02","question":"How many seconds are in a year on Mars?","gold_answer":59354304,"tolerance":100000,"answer_kind":"numeric","expected_tools":["tavily_search","unit_convert"],"category":"unit-conversion","difficulty":"medium"}
+{"id":"q02","question":"How many seconds are in a year on Mars?","gold_answer":59354304,"tolerance":100000,"answer_kind":"numeric","expected_tools":["tavily_search","calculator","unit_convert"],"category":"unit-conversion","difficulty":"medium"}
 {"id":"q03","question":"What is the speed of light in km/h?","gold_answer":1079252848,"tolerance":1000000,"answer_kind":"numeric","expected_tools":["unit_convert"],"category":"unit-conversion","difficulty":"easy"}
 {"id":"q04","question":"What year was Albert Einstein born, and how many years before the founding of Apple Inc.?","gold_answer":97,"tolerance":1,"answer_kind":"numeric","expected_tools":["wikipedia","tavily_search","datetime_tool"],"category":"datetime-reasoning","difficulty":"medium"}
 {"id":"q05","question":"What is the boiling point of water in Fahrenheit?","gold_answer":212,"tolerance":1,"answer_kind":"numeric","expected_tools":["unit_convert"],"category":"unit-conversion","difficulty":"easy"}
 {"id":"q06","question":"How many years between the iPhone launch and the iPad launch?","gold_answer":3,"tolerance":0,"answer_kind":"numeric","expected_tools":["tavily_search","tavily_search","datetime_tool"],"category":"datetime-reasoning","difficulty":"medium"}
-{"id":"q07","question":"What is the area of the United States in square kilometers, divided by Texas's area in square kilometers?","gold_answer":13.6,"tolerance":1.0,"answer_kind":"numeric","expected_tools":["tavily_search","tavily_search","calculator"],"category":"search-then-compute","difficulty":"medium"}
+{"id":"q07","question":"What is the area of the United States in square kilometers, divided by Texas's area in square kilometers?","gold_answer":14.0,"tolerance":1.5,"answer_kind":"numeric","expected_tools":["tavily_search","tavily_search","calculator"],"category":"search-then-compute","difficulty":"medium"}
 {"id":"q08","question":"What is the average distance from Earth to the Moon in miles?","gold_answer":238900,"tolerance":5000,"answer_kind":"numeric","expected_tools":["tavily_search","unit_convert"],"category":"unit-conversion","difficulty":"easy"}
 {"id":"q09","question":"What day of the week was July 20, 1969 (the moon landing)?","gold_answer":"Sunday","tolerance":null,"answer_kind":"string","expected_tools":["datetime_tool"],"category":"datetime-reasoning","difficulty":"easy"}
 {"id":"q10","question":"Who wrote 'One Hundred Years of Solitude' and what year were they born?","gold_answer":"1927","tolerance":null,"answer_kind":"string","expected_tools":["wikipedia"],"category":"multi-search-synthesis","difficulty":"easy"}
-{"id":"q11","question":"What is the population of Tokyo divided by the population of New York City?","gold_answer":1.6,"tolerance":0.5,"answer_kind":"numeric","expected_tools":["tavily_search","tavily_search","calculator"],"category":"search-then-compute","difficulty":"easy"}
+{"id":"q11","question":"What is the population of the Tokyo metropolis divided by the population of New York City (city proper)?","gold_answer":1.65,"tolerance":0.5,"answer_kind":"numeric","expected_tools":["tavily_search","tavily_search","calculator"],"category":"search-then-compute","difficulty":"easy"}
 {"id":"q12","question":"Convert 70 miles per hour to meters per second.","gold_answer":31.3,"tolerance":0.5,"answer_kind":"numeric","expected_tools":["unit_convert"],"category":"unit-conversion","difficulty":"easy"}
 {"id":"q13","question":"What is the GDP of Japan in 2023, divided by Japan's population, divided by the average annual salary in the US?","gold_answer":0.5,"tolerance":0.3,"answer_kind":"numeric","expected_tools":["tavily_search","tavily_search","tavily_search","calculator","calculator"],"category":"multi-tool-freestyle","difficulty":"hard"}
 {"id":"q14","question":"What year was the Eiffel Tower built, and how many years ago was that from 2024?","gold_answer":135,"tolerance":1,"answer_kind":"numeric","expected_tools":["wikipedia","datetime_tool"],"category":"datetime-reasoning","difficulty":"easy"}
