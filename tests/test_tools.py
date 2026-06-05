@@ -279,3 +279,64 @@ class TestUnitConvert:
         from multitool.tools.unit_convert import unit_convert
         result = unit_convert(1.0, "florblegorps", "meter")
         assert "error" in result.lower() or "undefined" in result.lower()
+
+
+class TestWikipedia:
+
+    @pytest.fixture(autouse=True)
+    def _reset_client(self):
+        """Same pattern as TestTavilySearch: reset cached client before+after
+        each test so successful tests don't leak real clients into later tests."""
+        import multitool.tools.wikipedia as wiki_mod
+        wiki_mod._client = None
+        yield
+        wiki_mod._client = None
+
+    def test_returns_summary(self, mocker):
+        from multitool.tools.wikipedia import wikipedia as wiki_tool
+
+        mock_page = mocker.MagicMock()
+        mock_page.exists.return_value = True
+        mock_page.summary = (
+            "Python is a high-level programming language. "
+            "Created by Guido van Rossum in 1991. "
+            "It emphasizes code readability. "
+            "Python supports multiple programming paradigms."
+        )
+
+        mock_client = mocker.MagicMock()
+        mock_client.page.return_value = mock_page
+        mocker.patch("multitool.tools.wikipedia._get_client", return_value=mock_client)
+
+        result = wiki_tool("Python")
+        assert "Python is a high-level programming language" in result
+
+    def test_returns_only_n_sentences(self, mocker):
+        from multitool.tools.wikipedia import wikipedia as wiki_tool
+
+        mock_page = mocker.MagicMock()
+        mock_page.exists.return_value = True
+        mock_page.summary = "One. Two. Three. Four. Five."
+
+        mock_client = mocker.MagicMock()
+        mock_client.page.return_value = mock_page
+        mocker.patch("multitool.tools.wikipedia._get_client", return_value=mock_client)
+
+        result = wiki_tool("anything", sentences=2)
+        # Should contain first 2 sentences but not the rest
+        assert "One" in result
+        assert "Two" in result
+        assert "Four" not in result
+
+    def test_not_found(self, mocker):
+        from multitool.tools.wikipedia import wikipedia as wiki_tool
+
+        mock_page = mocker.MagicMock()
+        mock_page.exists.return_value = False
+
+        mock_client = mocker.MagicMock()
+        mock_client.page.return_value = mock_page
+        mocker.patch("multitool.tools.wikipedia._get_client", return_value=mock_client)
+
+        result = wiki_tool("ThisTopicDoesNotExistOnWikipedia")
+        assert "not found" in result.lower() or "no page" in result.lower()
