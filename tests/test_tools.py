@@ -178,3 +178,21 @@ class TestTavilySearch:
 
         with pytest.raises(RuntimeError, match="TAVILY_API_KEY"):
             tavily_search("anything")
+
+
+class TestTavilySearchReal:
+    """Real-API smoke test. Run with: pytest -m slow"""
+
+    @pytest.mark.slow
+    def test_real_search_returns_something(self):
+        import os
+        if not os.environ.get("TAVILY_API_KEY"):
+            pytest.skip("TAVILY_API_KEY not set; skipping real-API test")
+
+        # Reset cached client (test may run after a mocked test left it patched)
+        import multitool.tools.search as search_mod
+        search_mod._client = None
+
+        from multitool.tools.search import tavily_search
+        result = tavily_search("What is the capital of France?")
+        assert "Paris" in result
