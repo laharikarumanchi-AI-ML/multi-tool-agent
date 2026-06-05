@@ -236,3 +236,28 @@ class TestCalculator:
         from multitool.tools.calculator import calculator
         result = calculator("__import__('os').system('ls')")
         assert "error" in result.lower()
+
+
+class TestDatetimeTool:
+
+    def test_years_between(self):
+        from multitool.tools.datetime_tool import datetime_tool
+        # Apple founded 1976, iPhone launched 2007
+        result = datetime_tool("years_between", "1976", "2007")
+        assert "31" in result
+
+    def test_add_years(self):
+        from multitool.tools.datetime_tool import datetime_tool
+        result = datetime_tool("add_years", "2024", "5")
+        assert "2029" in result
+
+    def test_day_of_week(self):
+        from multitool.tools.datetime_tool import datetime_tool
+        # 2024-07-04 was a Thursday
+        result = datetime_tool("day_of_week", "2024-07-04")
+        assert "Thursday" in result
+
+    def test_unknown_operation(self):
+        from multitool.tools.datetime_tool import datetime_tool
+        result = datetime_tool("invalid_op", "2024")
+        assert "error" in result.lower() or "unknown" in result.lower()
