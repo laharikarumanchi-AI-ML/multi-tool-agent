@@ -213,3 +213,26 @@ class TestTavilySearchReal:
         from multitool.tools.search import tavily_search
         result = tavily_search("What is the capital of France?")
         assert "Paris" in result
+
+
+class TestCalculator:
+
+    def test_simple_arithmetic(self):
+        from multitool.tools.calculator import calculator
+        assert calculator("2 + 2") == "4"
+
+    def test_floating_point(self):
+        from multitool.tools.calculator import calculator
+        result = float(calculator("2664452 / 81632"))
+        assert abs(result - 32.64) < 0.01
+
+    def test_handles_syntax_error(self):
+        from multitool.tools.calculator import calculator
+        result = calculator("2 +")
+        assert "error" in result.lower() or "invalid" in result.lower()
+
+    def test_rejects_unsafe_expressions(self):
+        """numexpr doesn't execute arbitrary Python — verify this."""
+        from multitool.tools.calculator import calculator
+        result = calculator("__import__('os').system('ls')")
+        assert "error" in result.lower()
