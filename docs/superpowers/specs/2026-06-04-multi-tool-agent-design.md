@@ -85,26 +85,61 @@ The decorator reads function signature + docstring to auto-build a JSON schema c
 ```python
 # multitool/tools/__init__.py
 import inspect
-from typing import Callable, get_type_hints
+from typing import Callable, Union, get_type_hints, get_origin, get_args
+from types import NoneType
 
 TOOL_REGISTRY: dict[str, dict] = {}
 
+# Supported Python types → JSON Schema types. Closed set; anything else raises.
+PY_TO_JSON_TYPE: dict[type, str] = {
+    str:   "string",
+    int:   "integer",
+    float: "number",
+    bool:  "boolean",
+}
+
+class UnsupportedToolTypeError(TypeError):
+    """A tool's parameter has a type the decorator cannot map to JSON Schema."""
+
+def _py_to_json_type(hint) -> str:
+    """Map a Python type hint to a JSON Schema type string.
+    Handles Optional[X] (= X | None) by stripping NoneType."""
+    if get_origin(hint) is Union:
+        args = tuple(a for a in get_args(hint) if a is not NoneType)
+        if len(args) == 1:
+            return _py_to_json_type(args[0])
+        raise UnsupportedToolTypeError(f"Union of multiple non-None types: {hint}")
+    if hint in PY_TO_JSON_TYPE:
+        return PY_TO_JSON_TYPE[hint]
+    raise UnsupportedToolTypeError(f"Unsupported tool parameter type: {hint!r}")
+
 def tool(fn: Callable):
-    """Decorator. Registers fn in TOOL_REGISTRY with auto-generated schema."""
+    """Decorator. Registers fn in TOOL_REGISTRY with auto-generated schema.
+    Requires a docstring (raises ValueError if missing — tool descriptions
+    are load-bearing for tool-selection accuracy)."""
+    if not inspect.getdoc(fn):
+        raise ValueError(
+            f"@tool {fn.__name__}: docstring required (used as tool description)"
+        )
     hints = get_type_hints(fn)
     sig = inspect.signature(fn)
+    # `required` excludes parameters that have defaults (they're optional).
+    required = [
+        name for name, param in sig.parameters.items()
+        if param.default is inspect.Parameter.empty
+    ]
     schema = {
         "type": "function",
         "function": {
             "name": fn.__name__,
-            "description": inspect.getdoc(fn) or "",
+            "description": inspect.getdoc(fn),
             "parameters": {
                 "type": "object",
                 "properties": {
                     name: {"type": _py_to_json_type(hints[name])}
                     for name in sig.parameters
                 },
-                "required": list(sig.parameters.keys()),
+                "required": required,
             },
         },
     }
@@ -119,7 +154,23 @@ def tavily_search(query: str) -> str:
     ...
 ```
 
-`_py_to_json_type` maps Python types to JSON schema types (`str` → `"string"`, `int` → `"integer"`, etc.). Required parameters are inferred from signature; optionals (with defaults) are excluded from `required`.
+**Supported parameter types** (closed set; anything else raises `UnsupportedToolTypeError`):
+
+| Python type | JSON Schema | Notes |
+|---|---|---|
+| `str` | `"string"` | |
+| `int` | `"integer"` | |
+| `float` | `"number"` | |
+| `bool` | `"boolean"` | |
+| `str \| None` (= `Optional[str]`) | `"string"` | NoneType stripped from union; outer field also excluded from `required` since it has default `None` |
+| `int \| None`, `float \| None`, `bool \| None` | same as non-Optional variants | same rule |
+| `list[X]`, `dict[X, Y]`, custom classes, unions of multiple non-None types | — | Raise `UnsupportedToolTypeError`. Out of scope for v1. |
+
+**Decorator behaviors:**
+
+- **Docstring required.** `@tool def foo(): ...` without docstring raises `ValueError` at decoration time. Test: `test_tools.py::test_decorator_requires_docstring`.
+- **Optionals excluded from `required`.** Parameters with default values are listed in `properties` but excluded from `required`. Test: `test_tools.py::test_optional_param_not_required`.
+- **Optional unions handled.** `str | None` → schema type `"string"` + excluded from `required`. Test: `test_tools.py::test_optional_str_schema`.
 
 ### 3.3 The 5 tools
 
@@ -226,27 +277,60 @@ No `Thought:` / `Action:` scaffold. Groq's `tools=` API enforces the call format
 
 ### 3.5 LLMClient extension
 
-`multitool/llm_client.py` is the DA Agent's `Lahari/agent/llm_client.py` copied verbatim (with attribution header) + one new method:
+`multitool/llm_client.py` is the DA Agent's `Lahari/agent/llm_client.py` copied verbatim (with attribution header pointing back to the source commit). Auditing the source: the existing Protocol exposes a **single method**, `chat()`. There is no `with_budget()` or `name()` — earlier drafts of this spec misrepresented the source as having those; corrected here.
+
+Three changes to the copied file:
+
+1. **Extend the Protocol** to declare `chat_with_tools()`.
+2. **Implement `chat_with_tools()` on `GroqClient` and `GeminiClient`** — each handles its provider's tool-call response format and normalizes to the project's `ToolResponse` dataclass.
+3. **No `name()` method needed.** For demo + trace purposes, the project uses `type(client).__name__` (yields `"GroqClient"` / `"GeminiClient"`) or an explicit `provider_label: str` passed alongside the client where a human-friendly name is needed.
 
 ```python
+# Final Protocol shape after the extension
 class LLMClient(Protocol):
-    def chat(self, messages: list[Message]) -> str: ...
-    def chat_with_tools(self, messages: list[Message], tools: list[dict]) -> ToolResponse: ...
-    def with_budget(self, max_tokens: int) -> Self: ...
-    def name(self) -> str: ...
+    def chat(self, messages: list[dict], **kwargs) -> str: ...
+    def chat_with_tools(
+        self,
+        messages: list[dict],
+        tools: list[dict],
+        **kwargs,
+    ) -> ToolResponse: ...
+
+@dataclass
+class ToolCall:
+    id: str          # Provider-issued ID. Forwarded in the next message's tool_call_id.
+    name: str        # Tool function name (matches a key in TOOL_REGISTRY).
+    arguments: dict  # ALWAYS a parsed dict — chat_with_tools() handles json.loads.
 
 @dataclass
 class ToolResponse:
-    content: str | None         # None if model used tool_calls
-    tool_calls: list[ToolCall]  # empty if model produced content directly
+    content: str | None         # None if model used tool_calls only
+    tool_calls: list[ToolCall]  # Empty list if model produced content directly
 ```
 
-Groq's response format ([Groq docs](https://console.groq.com/docs/tool-use)):
+**Critical: `arguments` is always a parsed `dict`, never a string.** Groq's raw API response returns `"arguments"` as a JSON-encoded string (`{"function": {"arguments": "{\"query\": \"...\"}"}}`). The `chat_with_tools()` implementation is responsible for calling `json.loads(raw_arguments)` BEFORE constructing the `ToolCall`. Tests verify this — `test_llm_client.py::test_chat_with_tools_parses_arguments_to_dict`.
+
+The orchestrator then calls `fn(**call.arguments)` without any further parsing.
+
+#### Provider format normalization
+
+Groq's response format ([docs](https://console.groq.com/docs/tool-use)) — OpenAI-compatible:
+
 ```json
-{"choices": [{"message": {"tool_calls": [{"id": "...", "function": {"name": "...", "arguments": "..."}}]}}]}
+{"choices": [{"message": {"tool_calls": [
+    {"id": "call_abc", "function": {"name": "tavily_search", "arguments": "{\"query\": \"...\"}"}}
+]}}]}
 ```
 
-Gemini's format (Google AI Studio docs) is slightly different — uses `functionCall` field. The `chat_with_tools()` implementation per-provider handles the translation. Both producers normalize to the project's `ToolResponse` dataclass.
+Gemini's format ([docs](https://ai.google.dev/api/docs/function-calling)) uses `functionCall` (camelCase, dict arguments not JSON string):
+
+```json
+{"candidates": [{"content": {"parts": [
+    {"functionCall": {"name": "tavily_search", "args": {"query": "..."}}}
+]}}]}
+```
+
+Gemini does NOT issue tool-call IDs; the Gemini client synthesizes them as `f"gemini-call-{uuid4().hex[:8]}"` so the rest of the loop (which uses `call.id` for the `tool_call_id` field) works uniformly. Test: `test_llm_client.py::test_gemini_synthesizes_call_ids`.
 
 ### 3.6 Error handling — 3 tiers
 
@@ -255,6 +339,21 @@ Gemini's format (Google AI Studio docs) is slightly different — uses `function
 | **Tool errors** (Tavily 5xx, numexpr syntax error, pint UndefinedUnitError) | Per-call exception | Retry up to 2× with same args. If still failing, surface error as `Observation`; model decides next step. |
 | **LLM errors** (rate limit 429, timeout, network blip) | API call exception | DA Agent's `LLMClient` handles this — 5 attempts with `Retry-After`-aware backoff. Direct reuse, no new code. |
 | **Format errors** (model returns malformed tool_calls JSON) | Parse exception in `chat_with_tools()` | Re-prompt with format reminder (`"Your previous response had malformed JSON. Please use the tools= schema."`); counts toward step ceiling. Rare with function-calling. |
+
+#### Repeated-failed-call loop — decision
+
+The `MAX_TOOL_RETRIES = 2` budget is **per-dispatch, not per-(name, args)**. It resets every step. That means the model could, in theory, call the same broken tool with the same arguments 10 times in a row, burn through the step ceiling, and exit with `error="max_steps_reached"`.
+
+**This is intentional.** The `MAX_STEPS = 10` ceiling is the only backstop. Two reasons:
+
+1. **The model often legitimately re-tries the same tool with different args after seeing the first failure.** A "we already saw this (name, args) and it failed" guard would block that recovery path. The model getting *new information* (the error message as an Observation) often does change its next call.
+2. **The repeat-call-with-same-args pathology is empirically rare** in function-calling-native loops. The model reads the error in the Observation and adjusts. If it doesn't, that's a finding worth surfacing as a `max_steps_reached` error, not silently masking with a guard.
+
+Tests pin this down:
+- `test_orchestrator.py::test_repeated_same_call_terminates_at_step_ceiling` — verifies the loop exits cleanly with `error="max_steps_reached"` when the model misbehaves.
+- `test_orchestrator.py::test_per_dispatch_retry_budget_resets_each_step` — verifies the 2-attempt budget is per-call, not lifetime.
+
+If empirically (during eval) the model does loop on the same call > 1× of total tasks, we revisit and add a per-(name, args) guard. Documented as a deferred improvement in §5 risk register.
 
 ### 3.7 Trace
 
@@ -271,17 +370,17 @@ Every run writes `traces/<run_id>.json`:
     {
       "step": 0,
       "tool_calls": [{"name": "tavily_search", "args": {"query": "Chicago population 2023"}}],
-      "observations": ["{\"results\": [...], \"answer\": \"Chicago population in 2023 was 2,664,452\"}"]
+      "results": ["{\"results\": [...], \"answer\": \"Chicago population in 2023 was 2,664,452\"}"]
     },
     {
       "step": 1,
       "tool_calls": [{"name": "tavily_search", "args": {"query": "US GDP per capita 2023"}}],
-      "observations": ["..."]
+      "results": ["..."]
     },
     {
       "step": 2,
       "tool_calls": [{"name": "calculator", "args": {"expression": "2664452 / 81632"}}],
-      "observations": ["32.64"]
+      "results": ["32.64"]
     }
   ],
   "final_answer": "About 32.64 people per dollar of GDP per capita.",
@@ -315,6 +414,8 @@ Used by:
 }
 ```
 
+**Per-question tolerance.** The example above uses `tolerance: 1.0` for illustration only; real tolerances are calibrated when the test set is authored. For ratio answers like q01 (gold ≈ 32.6), `tolerance: 0.5` is a defensible default — accommodates "32.64", "32.6", "33" rounding while rejecting "32" (which would imply meaningfully wrong inputs). The eval JSONL author MUST think about tolerance per question, not copy 1.0 across the board.
+
 Balanced across 5 categories:
 
 | Category | Count | Example | Tools tested |
@@ -331,9 +432,33 @@ Every query is multi-tool by design (≥2 tool calls expected). Single-tool quer
 
 ```python
 # multitool/eval/scorer.py
+import re
+from typing import Any
+
+# Captures the FIRST float-or-int in a string. Handles negatives, commas
+# in big numbers ("2,664,452"), and scientific notation. Does NOT match
+# numbers embedded in words (e.g., "iPhone3").
+_NUMBER_RE = re.compile(r"(?<![A-Za-z])-?\d{1,3}(?:,\d{3})*(?:\.\d+)?(?:[eE][+-]?\d+)?")
+
+def _parse_number(text: str) -> float | None:
+    """Extract the FIRST numeric value from a prose answer.
+
+    Decision rationale: agent answers are typically headline-first
+    ("About 32.64..."), so the first number is almost always the intended
+    answer. Last-number / largest-number heuristics had higher error rates
+    in informal testing on the DA Agent's trace JSONs.
+    """
+    m = _NUMBER_RE.search(text)
+    if m is None:
+        return None
+    try:
+        return float(m.group().replace(",", ""))
+    except ValueError:
+        return None
+
 def score(predicted: str, gold: Any, kind: str, tolerance: float | None = None) -> dict:
     if kind == "numeric":
-        parsed = _parse_number(predicted)  # tries to extract a float from the answer
+        parsed = _parse_number(predicted)
         if parsed is None:
             return {"passed": False, "predicted": predicted, "parse_error": "no_number_found"}
         return {"passed": abs(parsed - gold) <= tolerance, "predicted": parsed}
@@ -342,6 +467,14 @@ def score(predicted: str, gold: Any, kind: str, tolerance: float | None = None) 
     if kind == "list":
         return {"passed": set(predicted) == set(gold), "predicted": predicted}
 ```
+
+**`_parse_number` decision: first-float-in-string.** When a prose answer contains multiple numbers (e.g., *"About 32.64 (or 33 depending on source)"*), the scorer takes the first match. Rationale:
+
+- Agent answers from function-calling-native models are typically headline-first (the answer-number leads, qualifications follow).
+- Last-number and largest-number heuristics had higher error rates in informal testing on DA Agent trace JSONs.
+- The behavior is testable: `test_eval.py::test_parse_number_picks_first_when_ambiguous` pins it.
+
+If `_parse_number` finds zero numbers in the response (e.g., the model answered *"I could not find this information"*), the result is `{"passed": false, "parse_error": "no_number_found"}`. The eval runner counts these toward the denominator.
 
 No partial credit. Strict like DA Agent's official InfiAgent scorer.
 
@@ -379,7 +512,7 @@ Target ~35-40 tests total. CI runs `pytest -v` on every push and PR.
 - Expandable trace UI: each step as a collapsible section showing `(tool_name, args, result)`
 - Final answer rendered at top once available
 - Side panel: 5-6 example queries the user can click to populate the input
-- Provider selector: Groq (default) / Gemini
+- Provider selector: Groq (default) / Gemini. Implemented as a Streamlit `selectbox` mapping label → `LLMClient` factory function (no `name()` method on the client needed; the label lives in the Streamlit code).
 
 Deployed to HF Spaces using the same `sys.path` bootstrap pattern as DA Agent / RAG to avoid `-e .` install issues.
 
@@ -410,7 +543,9 @@ After all 10 PRs:
 |---|---|
 | Tavily free-tier 1000 queries/month gets consumed during eval iteration | Eval runner checkpoints after every task (no re-running successful ones); HF Spaces demo uses separate Tavily key from local-dev key |
 | Groq quota crashes mid-eval (same problem DA Agent hit) | Resumable eval harness; provider abstraction lets you switch to Gemini for completion |
-| Function-calling format differs between Groq + Gemini | `LLMClient.chat_with_tools()` normalizes both into a single `ToolResponse` dataclass; per-provider impl handles the translation |
+| Function-calling format differs between Groq + Gemini | `LLMClient.chat_with_tools()` normalizes both into a single `ToolResponse` dataclass; per-provider impl handles the translation. Gemini synthesizes call IDs since the API doesn't issue them. |
+| Model loops on same failed (name, args) call until step ceiling | Accepted (see §3.6 "Repeated-failed-call loop — decision"). If empirically >1% of eval tasks exhibit this pathology, add a per-(name, args) seen-set guard as a deferred follow-up. |
+| Tool returns prose that model misinterprets as structured data | Tavily's pre-summarized `answer` field is freeform prose; the orchestrator just stringifies tool results. Tools document expected output shape in their docstrings; the model has been observed reliably treating Tavily snippets as prose, not JSON. Worth monitoring during eval. |
 | Tool error masquerades as success (e.g., Tavily returns "no results found" — agent treats it as a fact) | Eval set explicitly includes queries where the right answer is "I don't know" (1 in v1); orchestrator system prompt allows graceful "I could not find this" answers |
 | Agent gets stuck in loop calling the same failed tool | Per-tool retry capped at 2; step ceiling at 10; eval logs catch these as `max_steps_reached` errors |
 | Portfolio MDX stub says "LangChain" but the real project doesn't use it | Documented in §1; portfolio PR #7 rewrites the Approach paragraph + flips `techStack` frontmatter to match reality |
