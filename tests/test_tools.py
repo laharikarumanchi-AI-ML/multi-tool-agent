@@ -340,3 +340,19 @@ class TestWikipedia:
 
         result = wiki_tool("ThisTopicDoesNotExistOnWikipedia")
         assert "not found" in result.lower() or "no page" in result.lower()
+
+
+class TestAllToolsRegistered:
+    """After importing each tool module, all 5 tools should appear in TOOL_REGISTRY."""
+
+    def test_all_five_tools_registered(self):
+        from multitool.tools import TOOL_REGISTRY
+        # Force imports
+        import multitool.tools.search  # noqa: F401
+        import multitool.tools.calculator  # noqa: F401
+        import multitool.tools.datetime_tool  # noqa: F401
+        import multitool.tools.unit_convert  # noqa: F401
+        import multitool.tools.wikipedia  # noqa: F401
+
+        expected = {"tavily_search", "calculator", "datetime_tool", "unit_convert", "wikipedia"}
+        assert expected.issubset(set(TOOL_REGISTRY.keys()))
