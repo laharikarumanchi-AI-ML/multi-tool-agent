@@ -141,6 +141,18 @@ class TestToolDecoratorBehaviors:
 class TestTavilySearch:
     """tavily_search tool. Real API calls are @pytest.mark.slow; defaults are mocked."""
 
+    @pytest.fixture(autouse=True)
+    def _reset_client(self):
+        """Reset the cached Tavily client before AND after every test in this
+        class. Without the post-cleanup, a successful real-API test (in the
+        sibling TestTavilySearchReal class) leaves a real TavilyClient in the
+        cache; a subsequent test that forgets to patch would silently hit
+        the network. PR #4's tool test classes should follow this pattern."""
+        import multitool.tools.search as search_mod
+        search_mod._client = None
+        yield
+        search_mod._client = None
+
     def test_returns_formatted_string(self, mocker):
         from multitool.tools.search import tavily_search
 
@@ -183,15 +195,20 @@ class TestTavilySearch:
 class TestTavilySearchReal:
     """Real-API smoke test. Run with: pytest -m slow"""
 
+    @pytest.fixture(autouse=True)
+    def _reset_client(self):
+        """Same cleanup fixture as TestTavilySearch — ensures the real client
+        doesn't leak into subsequent tests in the session."""
+        import multitool.tools.search as search_mod
+        search_mod._client = None
+        yield
+        search_mod._client = None
+
     @pytest.mark.slow
     def test_real_search_returns_something(self):
         import os
         if not os.environ.get("TAVILY_API_KEY"):
             pytest.skip("TAVILY_API_KEY not set; skipping real-API test")
-
-        # Reset cached client (test may run after a mocked test left it patched)
-        import multitool.tools.search as search_mod
-        search_mod._client = None
 
         from multitool.tools.search import tavily_search
         result = tavily_search("What is the capital of France?")
