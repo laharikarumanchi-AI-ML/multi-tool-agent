@@ -1,0 +1,41 @@
+[project]
+name = "multitool"
+version = "0.1.0"
+description = "ReAct-style autonomous agent with function-calling-native tool dispatch — no LangChain."
+requires-python = ">=3.11"
+dependencies = [
+    "requests>=2.31.0",
+    "tavily-python>=0.5.0",
+    "numexpr>=2.10.0",
+    "pint>=0.24.0",
+    "wikipedia-api>=0.7.0",
+]
+
+[project.optional-dependencies]
+demo = ["streamlit>=1.31.0"]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-mock>=3.12.0",
+]
+
+[project.scripts]
+multitool = "multitool.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["multitool*"]
+
+[tool.setuptools.package-data]
+"*" = ["prompts/*.txt"]
+
+[tool.pytest.ini_options]
+addopts = "-ra -m 'not slow'"
+testpaths = ["tests"]
+log_cli = false
+markers = [
+    "slow: tests that hit real APIs (run with: pytest -m slow)",
+]
