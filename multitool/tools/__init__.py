@@ -32,7 +32,13 @@ def _py_to_json_type(hint) -> str:
 
 
 def tool(fn: Callable) -> Callable:
-    """Decorator. Registers fn in TOOL_REGISTRY with auto-generated JSON Schema."""
+    """Decorator. Registers fn in TOOL_REGISTRY with auto-generated JSON Schema.
+    Requires a docstring (raises ValueError if missing — tool descriptions
+    are load-bearing for tool-selection accuracy)."""
+    if not inspect.getdoc(fn):
+        raise ValueError(
+            f"@tool {fn.__name__}: docstring required (used as tool description)"
+        )
     hints = get_type_hints(fn)
     sig = inspect.signature(fn)
     required = [
@@ -43,7 +49,7 @@ def tool(fn: Callable) -> Callable:
         "type": "function",
         "function": {
             "name": fn.__name__,
-            "description": inspect.getdoc(fn) or "",
+            "description": inspect.getdoc(fn),
             "parameters": {
                 "type": "object",
                 "properties": {

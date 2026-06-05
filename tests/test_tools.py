@@ -97,3 +97,42 @@ class TestToolDecorator:
             "b": {"type": "integer"},
         }
         assert set(params["required"]) == {"a", "b"}
+
+
+class TestToolDecoratorBehaviors:
+
+    def setup_method(self):
+        from multitool.tools import TOOL_REGISTRY
+        TOOL_REGISTRY.clear()
+
+    def test_decorator_requires_docstring(self):
+        from multitool.tools import tool
+
+        with pytest.raises(ValueError, match="docstring required"):
+            @tool
+            def no_doc(query: str) -> str:
+                return query
+
+    def test_optional_param_not_required(self):
+        from multitool.tools import tool, TOOL_REGISTRY
+
+        @tool
+        def search(query: str, limit: int = 5) -> str:
+            """Search with optional limit."""
+            return query
+
+        params = TOOL_REGISTRY["search"]["schema"]["function"]["parameters"]
+        assert params["required"] == ["query"]  # limit excluded
+        assert "limit" in params["properties"]  # but still in properties
+
+    def test_optional_str_schema(self):
+        from multitool.tools import tool, TOOL_REGISTRY
+
+        @tool
+        def event(name: str, when: str | None = None) -> str:
+            """Optional when parameter."""
+            return f"{name} at {when}"
+
+        params = TOOL_REGISTRY["event"]["schema"]["function"]["parameters"]
+        assert params["properties"]["when"] == {"type": "string"}
+        assert params["required"] == ["name"]
