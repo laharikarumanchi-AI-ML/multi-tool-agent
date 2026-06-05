@@ -1,0 +1,15 @@
+# Requirements for Hugging Face Spaces deployment of the Streamlit demo.
+# HF reads this file at build time to install dependencies into the Space.
+# Local development uses pyproject.toml's [dev,demo] extras instead.
+#
+# Note: we deliberately do NOT install the multitool package via pip here.
+# HF Spaces mounts requirements.txt at /tmp at install time, but the
+# repo source isn't available yet at that step — so any `-e .` reference
+# fails. Instead, demo/app.py adds the repo root to sys.path explicitly.
+
+streamlit>=1.31.0
+requests>=2.31.0
+tavily-python>=0.5.0
+numexpr>=2.10.0
+pint>=0.24.0
+wikipedia-api>=0.7.0
