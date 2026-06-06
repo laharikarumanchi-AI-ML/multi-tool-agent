@@ -341,6 +341,57 @@ class TestWikipedia:
         result = wiki_tool("ThisTopicDoesNotExistOnWikipedia")
         assert "not found" in result.lower() or "no page" in result.lower()
 
+    def test_abbreviations_dont_cause_false_splits(self, mocker):
+        """Regression: a naive `(?<=[.!?])\\s+` regex mangles "U.S." and "Dr."
+        Verify our abbreviation-aware truncation keeps these intact."""
+        from multitool.tools.wikipedia import wikipedia as wiki_tool
+
+        mock_page = mocker.MagicMock()
+        mock_page.exists.return_value = True
+        mock_page.summary = (
+            "The United States of America (U.S.A. or USA), commonly known "
+            "as the United States (U.S. or US), is a country in North America. "
+            "It is a federal republic of 50 states. Its capital is Washington, D.C."
+        )
+
+        mock_client = mocker.MagicMock()
+        mock_client.page.return_value = mock_page
+        mocker.patch("multitool.tools.wikipedia._get_client", return_value=mock_client)
+
+        # Asking for 2 sentences should give us the full first 2 — NOT a
+        # fragment ending after "U.S."
+        result = wiki_tool("United States", sentences=2)
+        assert "country in North America" in result
+        assert "federal republic of 50 states" in result
+
+
+class TestDatetimeValidation:
+    """C1 fix: datetime_tool used to accept "19" and return "1988 years".
+    Now it rejects ill-formed years with a clear error message."""
+
+    def test_rejects_short_year_in_years_between(self):
+        from multitool.tools.datetime_tool import datetime_tool
+        result = datetime_tool("years_between", "19", "2007")
+        # Should be an error string, not "1988 years"
+        assert "error" in result.lower()
+        assert "1988" not in result
+
+    def test_rejects_non_numeric_year(self):
+        from multitool.tools.datetime_tool import datetime_tool
+        result = datetime_tool("years_between", "abc1976", "2007")
+        assert "error" in result.lower()
+
+    def test_iso_date_still_works(self):
+        """Regression: don't break the valid "YYYY-MM-DD" case."""
+        from multitool.tools.datetime_tool import datetime_tool
+        result = datetime_tool("years_between", "1976-07-04", "2007-01-09")
+        assert "31" in result
+
+    def test_add_years_rejects_non_integer_extra(self):
+        from multitool.tools.datetime_tool import datetime_tool
+        result = datetime_tool("add_years", "2024", "five")  # word, not "5"
+        assert "error" in result.lower()
+
 
 class TestAllToolsRegistered:
     """After importing each tool module, all 5 tools should appear in TOOL_REGISTRY."""
