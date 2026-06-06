@@ -336,9 +336,24 @@ Gemini does NOT issue tool-call IDs; the Gemini client synthesizes them as `f"ge
 
 | Tier | Trigger | Response |
 |---|---|---|
-| **Tool errors** (Tavily 5xx, numexpr syntax error, pint UndefinedUnitError) | Per-call exception | Retry up to 2× with same args. If still failing, surface error as `Observation`; model decides next step. |
+| **Tool errors — network class** (Tavily 5xx, Wikipedia network blip) | Per-call exception RAISED by the tool | Retry up to 2× with same args (might succeed on retry). If still failing, surface as `Observation`; model decides next step. |
+| **Tool errors — deterministic class** (numexpr syntax error, pint UndefinedUnitError, datetime parse error) | Tool RETURNS an error STRING (no exception) | Single attempt. The error string IS the Observation; the model sees it and picks a different arg shape on the next step. Retrying with the same broken args is wasted Groq tokens — these errors don't fix themselves. |
 | **LLM errors** (rate limit 429, timeout, network blip) | API call exception | DA Agent's `LLMClient` handles this — 5 attempts with `Retry-After`-aware backoff. Direct reuse, no new code. |
 | **Format errors** (model returns malformed tool_calls JSON) | Parse exception in `chat_with_tools()` | Re-prompt with format reminder (`"Your previous response had malformed JSON. Please use the tools= schema."`); counts toward step ceiling. Rare with function-calling. |
+
+#### Per-tool error convention (codified)
+
+PR #4's code-quality review surfaced that the 5 tools split into two error-handling classes by their failure mode. The convention below is **load-bearing** — the orchestrator's `_dispatch_with_retry` relies on it:
+
+| Tool | Convention | Why |
+|---|---|---|
+| `tavily_search` | RAISES on network errors | 5xx / connection-reset / timeout — retrying might succeed |
+| `wikipedia` | RAISES on network errors | Same — wikipedia-api wraps a real HTTP client |
+| `calculator` | RETURNS error string on numexpr errors | A syntax error doesn't fix itself on retry; model needs to see the error and rewrite the expression |
+| `datetime_tool` | RETURNS error string on parse errors | Same — bad year format doesn't self-heal; model picks a different format |
+| `unit_convert` | RETURNS error string on undefined unit | Same — `pint.UndefinedUnitError` doesn't self-heal; model picks a different unit name |
+
+The PR #4 module docstrings already document this per-tool. The orchestrator should NOT wrap deterministic tools in additional try/except — they return their own error strings as valid string returns, which the orchestrator treats as Observations (not retries).
 
 #### Repeated-failed-call loop — decision
 

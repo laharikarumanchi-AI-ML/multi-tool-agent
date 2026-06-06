@@ -213,3 +213,197 @@ class TestTavilySearchReal:
         from multitool.tools.search import tavily_search
         result = tavily_search("What is the capital of France?")
         assert "Paris" in result
+
+
+class TestCalculator:
+
+    def test_simple_arithmetic(self):
+        from multitool.tools.calculator import calculator
+        assert calculator("2 + 2") == "4"
+
+    def test_floating_point(self):
+        from multitool.tools.calculator import calculator
+        result = float(calculator("2664452 / 81632"))
+        assert abs(result - 32.64) < 0.01
+
+    def test_handles_syntax_error(self):
+        from multitool.tools.calculator import calculator
+        result = calculator("2 +")
+        assert "error" in result.lower() or "invalid" in result.lower()
+
+    def test_rejects_unsafe_expressions(self):
+        """numexpr doesn't execute arbitrary Python — verify this."""
+        from multitool.tools.calculator import calculator
+        result = calculator("__import__('os').system('ls')")
+        assert "error" in result.lower()
+
+
+class TestDatetimeTool:
+
+    def test_years_between(self):
+        from multitool.tools.datetime_tool import datetime_tool
+        # Apple founded 1976, iPhone launched 2007
+        result = datetime_tool("years_between", "1976", "2007")
+        assert "31" in result
+
+    def test_add_years(self):
+        from multitool.tools.datetime_tool import datetime_tool
+        result = datetime_tool("add_years", "2024", "5")
+        assert "2029" in result
+
+    def test_day_of_week(self):
+        from multitool.tools.datetime_tool import datetime_tool
+        # 2024-07-04 was a Thursday
+        result = datetime_tool("day_of_week", "2024-07-04")
+        assert "Thursday" in result
+
+    def test_unknown_operation(self):
+        from multitool.tools.datetime_tool import datetime_tool
+        result = datetime_tool("invalid_op", "2024")
+        assert "error" in result.lower() or "unknown" in result.lower()
+
+
+class TestUnitConvert:
+
+    def test_mph_to_ms(self):
+        from multitool.tools.unit_convert import unit_convert
+        result = float(unit_convert(60.0, "mile/hour", "meter/second"))
+        assert abs(result - 26.82) < 0.1
+
+    def test_km_to_mile(self):
+        from multitool.tools.unit_convert import unit_convert
+        result = float(unit_convert(100.0, "kilometer", "mile"))
+        assert abs(result - 62.14) < 0.1
+
+    def test_unknown_unit_returns_error(self):
+        from multitool.tools.unit_convert import unit_convert
+        result = unit_convert(1.0, "florblegorps", "meter")
+        assert "error" in result.lower() or "undefined" in result.lower()
+
+
+class TestWikipedia:
+
+    @pytest.fixture(autouse=True)
+    def _reset_client(self):
+        """Same pattern as TestTavilySearch: reset cached client before+after
+        each test so successful tests don't leak real clients into later tests."""
+        import multitool.tools.wikipedia as wiki_mod
+        wiki_mod._client = None
+        yield
+        wiki_mod._client = None
+
+    def test_returns_summary(self, mocker):
+        from multitool.tools.wikipedia import wikipedia as wiki_tool
+
+        mock_page = mocker.MagicMock()
+        mock_page.exists.return_value = True
+        mock_page.summary = (
+            "Python is a high-level programming language. "
+            "Created by Guido van Rossum in 1991. "
+            "It emphasizes code readability. "
+            "Python supports multiple programming paradigms."
+        )
+
+        mock_client = mocker.MagicMock()
+        mock_client.page.return_value = mock_page
+        mocker.patch("multitool.tools.wikipedia._get_client", return_value=mock_client)
+
+        result = wiki_tool("Python")
+        assert "Python is a high-level programming language" in result
+
+    def test_returns_only_n_sentences(self, mocker):
+        from multitool.tools.wikipedia import wikipedia as wiki_tool
+
+        mock_page = mocker.MagicMock()
+        mock_page.exists.return_value = True
+        mock_page.summary = "One. Two. Three. Four. Five."
+
+        mock_client = mocker.MagicMock()
+        mock_client.page.return_value = mock_page
+        mocker.patch("multitool.tools.wikipedia._get_client", return_value=mock_client)
+
+        result = wiki_tool("anything", sentences=2)
+        # Should contain first 2 sentences but not the rest
+        assert "One" in result
+        assert "Two" in result
+        assert "Four" not in result
+
+    def test_not_found(self, mocker):
+        from multitool.tools.wikipedia import wikipedia as wiki_tool
+
+        mock_page = mocker.MagicMock()
+        mock_page.exists.return_value = False
+
+        mock_client = mocker.MagicMock()
+        mock_client.page.return_value = mock_page
+        mocker.patch("multitool.tools.wikipedia._get_client", return_value=mock_client)
+
+        result = wiki_tool("ThisTopicDoesNotExistOnWikipedia")
+        assert "not found" in result.lower() or "no page" in result.lower()
+
+    def test_abbreviations_dont_cause_false_splits(self, mocker):
+        """Regression: a naive `(?<=[.!?])\\s+` regex mangles "U.S." and "Dr."
+        Verify our abbreviation-aware truncation keeps these intact."""
+        from multitool.tools.wikipedia import wikipedia as wiki_tool
+
+        mock_page = mocker.MagicMock()
+        mock_page.exists.return_value = True
+        mock_page.summary = (
+            "The United States of America (U.S.A. or USA), commonly known "
+            "as the United States (U.S. or US), is a country in North America. "
+            "It is a federal republic of 50 states. Its capital is Washington, D.C."
+        )
+
+        mock_client = mocker.MagicMock()
+        mock_client.page.return_value = mock_page
+        mocker.patch("multitool.tools.wikipedia._get_client", return_value=mock_client)
+
+        # Asking for 2 sentences should give us the full first 2 — NOT a
+        # fragment ending after "U.S."
+        result = wiki_tool("United States", sentences=2)
+        assert "country in North America" in result
+        assert "federal republic of 50 states" in result
+
+
+class TestDatetimeValidation:
+    """C1 fix: datetime_tool used to accept "19" and return "1988 years".
+    Now it rejects ill-formed years with a clear error message."""
+
+    def test_rejects_short_year_in_years_between(self):
+        from multitool.tools.datetime_tool import datetime_tool
+        result = datetime_tool("years_between", "19", "2007")
+        # Should be an error string, not "1988 years"
+        assert "error" in result.lower()
+        assert "1988" not in result
+
+    def test_rejects_non_numeric_year(self):
+        from multitool.tools.datetime_tool import datetime_tool
+        result = datetime_tool("years_between", "abc1976", "2007")
+        assert "error" in result.lower()
+
+    def test_iso_date_still_works(self):
+        """Regression: don't break the valid "YYYY-MM-DD" case."""
+        from multitool.tools.datetime_tool import datetime_tool
+        result = datetime_tool("years_between", "1976-07-04", "2007-01-09")
+        assert "31" in result
+
+    def test_add_years_rejects_non_integer_extra(self):
+        from multitool.tools.datetime_tool import datetime_tool
+        result = datetime_tool("add_years", "2024", "five")  # word, not "5"
+        assert "error" in result.lower()
+
+
+class TestAllToolsRegistered:
+    """After importing each tool module, all 5 tools should appear in TOOL_REGISTRY."""
+
+    def test_all_five_tools_registered(self):
+        from multitool.tools import TOOL_REGISTRY
+        # Force imports
+        import multitool.tools.search  # noqa: F401
+        import multitool.tools.calculator  # noqa: F401
+        import multitool.tools.datetime_tool  # noqa: F401
+        import multitool.tools.unit_convert  # noqa: F401
+        import multitool.tools.wikipedia  # noqa: F401
+
+        expected = {"tavily_search", "calculator", "datetime_tool", "unit_convert", "wikipedia"}
+        assert expected.issubset(set(TOOL_REGISTRY.keys()))
