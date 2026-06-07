@@ -194,17 +194,19 @@ class TestCliVerboseTrace:
 
 
 class TestCliMaxStepsReached:
-    """Tests for the partial-answer-on-max-steps path."""
+    """Tests for the max-steps-reached failure path."""
 
     def test_max_steps_prints_warning_to_stderr_and_exits_nonzero(
         self, monkeypatch, capsys
     ):
-        """`max_steps_reached` is a soft failure: print any partial answer
-        on stdout, warn on stderr, exit 1."""
+        """When orchestrator returns max_steps_reached, CLI prints warning to
+        stderr and exits 1 (no partial answer is surfaced — the orchestrator
+        hard-codes answer=None in this branch, per orchestrator.py:127-133)."""
         result = _fake_result(
-            answer="best guess: 42",
+            answer=None,
             steps_taken=10,
             error="max_steps_reached",
+            trace_path="traces/abc.json",
         )
         monkeypatch.setattr(cli, "_run_agent", lambda **kwargs: result)
 
@@ -212,5 +214,6 @@ class TestCliMaxStepsReached:
 
         assert rc == 1
         captured = capsys.readouterr()
-        assert "best guess: 42" in captured.out  # partial answer on stdout
+        assert captured.out == ""  # no partial answer surfaced
         assert "max steps" in captured.err.lower()  # warning on stderr
+        assert "traces/abc.json" in captured.err  # trace path included for debug

@@ -10,8 +10,8 @@ Error-handling philosophy (project-wide):
 - Missing required env var → friendly stderr + exit 1 (NOT a stack trace).
 - Orchestrator raises → friendly stderr + exit 1; the raw traceback is only
   re-raised when ``--verbose`` is set, so library bugs are debuggable.
-- Orchestrator returns ``error="max_steps_reached"`` → print whatever
-  partial answer exists + a stderr warning, then exit 1.
+- Orchestrator returns ``error="max_steps_reached"`` → print warning to
+  stderr, exit 1 (orchestrator does not surface partial state).
 - argparse errors (missing question, unknown subcommand) bubble up as
   ``SystemExit(2)`` — argparse's own default — so shells see the standard
   "usage error" exit code.
@@ -179,10 +179,9 @@ def main(argv: Optional[list[str]] = None) -> int:
             _print_tool_calls(result.tool_calls)
 
         if result.error == "max_steps_reached":
-            # Partial-answer-if-any + warning; still nonzero exit so scripts
-            # can detect the truncation.
-            if result.answer:
-                print(result.answer)
+            # Orchestrator hard-codes answer=None on max_steps_reached, so there
+            # is no partial state to surface — just warn on stderr and exit 1
+            # so scripts can detect the truncation.
             print(
                 f"warning: agent hit max steps ({result.steps_taken}) without finalizing. "
                 f"Trace: {result.trace_path}",
