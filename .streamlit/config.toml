@@ -1,0 +1,17 @@
+# Streamlit theme + server tweaks for the multi-tool-agent demo.
+# Applied on HF Spaces and locally; safe to delete (defaults still work).
+
+[theme]
+primaryColor = "#4F46E5"          # indigo-600
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F5F7FB"
+textColor = "#0F172A"             # slate-900
+font = "sans serif"
+
+[server]
+# HF Spaces sets these via env vars; harmless to leave defaults here.
+headless = true
+runOnSave = false
+
+[browser]
+gatherUsageStats = false
