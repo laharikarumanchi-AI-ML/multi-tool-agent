@@ -142,5 +142,113 @@ class TestGeminiChatWithTools:
         result = client.chat_with_tools(messages=[], tools=[])
         assert len(result.tool_calls) == 1
         assert result.tool_calls[0].id.startswith("gemini-call-")
+        # Full 32-hex uuid (gemini-call- prefix is 12 chars + 32 hex = 44)
+        assert len(result.tool_calls[0].id) == len("gemini-call-") + 32
         assert result.tool_calls[0].name == "tavily_search"
         assert result.tool_calls[0].arguments == {"query": "Chicago"}  # already dict
+
+    def test_returns_content_when_model_answers_directly(self, mocker):
+        """Parallel to Groq's content-path test."""
+        from multitool.llm_client import GeminiClient, ToolResponse
+
+        mock_resp = mocker.MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.url = "https://example.com/foo?key=secret"  # exercises the scrub
+        mock_resp.json.return_value = {
+            "candidates": [{
+                "content": {
+                    "parts": [{"text": "Hello from Gemini"}]
+                }
+            }]
+        }
+        mocker.patch("multitool.llm_client.requests.post", return_value=mock_resp)
+
+        client = GeminiClient(api_key="dummy")
+        result = client.chat_with_tools(messages=[], tools=[])
+        assert result.content == "Hello from Gemini"
+        assert result.tool_calls == []
+
+    def test_arguments_always_dict_for_gemini(self, mocker):
+        """Parallel to Groq's arguments-as-dict test. Gemini already gives dict."""
+        from multitool.llm_client import GeminiClient
+
+        mock_resp = mocker.MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.url = "https://example.com/foo"
+        mock_resp.json.return_value = {
+            "candidates": [{
+                "content": {
+                    "parts": [{
+                        "functionCall": {
+                            "name": "calculator",
+                            "args": {"expression": "2+2", "verbose": True},
+                        }
+                    }]
+                }
+            }]
+        }
+        mocker.patch("multitool.llm_client.requests.post", return_value=mock_resp)
+
+        client = GeminiClient(api_key="dummy")
+        result = client.chat_with_tools(messages=[], tools=[])
+        assert isinstance(result.tool_calls[0].arguments, dict)
+        assert result.tool_calls[0].arguments == {"expression": "2+2", "verbose": True}
+
+
+class TestChatWithToolsContractGuards:
+    """C1 + I1 fixes from code-quality review."""
+
+    def test_groq_4xx_raises_immediately_no_retry(self, mocker):
+        """C1: bad auth (401) shouldn't burn 5 retries × ~62s of backoff."""
+        from multitool.llm_client import GroqClient
+
+        mock_resp = mocker.MagicMock()
+        mock_resp.status_code = 401  # Unauthorized
+        mock_resp.raise_for_status.side_effect = __import__("requests").HTTPError(
+            "401 Client Error", response=mock_resp
+        )
+        post_mock = mocker.patch("multitool.llm_client.requests.post", return_value=mock_resp)
+
+        client = GroqClient(api_key="bad_key")
+        with pytest.raises(Exception):
+            client.chat_with_tools(messages=[], tools=[])
+
+        # Critical: only ONE attempt, not 5
+        assert post_mock.call_count == 1
+
+    def test_gemini_4xx_raises_immediately_no_retry(self, mocker):
+        """C1 for Gemini: 400 malformed function schema shouldn't burn 5 retries."""
+        from multitool.llm_client import GeminiClient
+
+        mock_resp = mocker.MagicMock()
+        mock_resp.status_code = 400  # Bad Request
+        mock_resp.url = "https://example.com/foo"
+        mock_resp.raise_for_status.side_effect = __import__("requests").HTTPError(
+            "400 Client Error", response=mock_resp
+        )
+        post_mock = mocker.patch("multitool.llm_client.requests.post", return_value=mock_resp)
+
+        client = GeminiClient(api_key="dummy")
+        with pytest.raises(Exception):
+            client.chat_with_tools(messages=[], tools=[])
+
+        assert post_mock.call_count == 1
+
+    def test_groq_reserved_kwarg_raises_value_error(self):
+        """I1: caller cannot override 'tools' / 'messages' / 'model' via kwargs."""
+        from multitool.llm_client import GroqClient
+
+        client = GroqClient(api_key="dummy")
+        with pytest.raises(ValueError, match="reserved kwargs"):
+            client.chat_with_tools(messages=[], tools=[], model="other-model")
+
+    def test_gemini_reserved_kwarg_raises_value_error(self):
+        """Symmetric with Groq guard — passing `model` via kwargs is the
+        realistic case (caller splats a config dict)."""
+        from multitool.llm_client import GeminiClient
+
+        client = GeminiClient(api_key="dummy")
+        # Simulate someone splatting a config dict that has `model` in it
+        bad_config = {"model": "gemini-1.5-flash"}
+        with pytest.raises(ValueError, match="reserved kwargs"):
+            client.chat_with_tools(messages=[], tools=[], **bad_config)

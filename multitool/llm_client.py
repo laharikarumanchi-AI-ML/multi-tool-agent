@@ -6,10 +6,62 @@ with this attribution header. The original lives at:
 
 Extended here with chat_with_tools() for function-calling-native agent loops.
 """
+from dataclasses import dataclass
 from typing import Protocol
+from uuid import uuid4
 import json
 import time
 import requests
+
+# Status codes worth retrying on. Permanent failures (400, 401, 403, 404)
+# don't fix themselves and shouldn't burn the retry budget.
+_RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
+
+# Reserved kwargs that chat_with_tools() callers must NOT override —
+# `model` is the one realistic conflict (caller could pass it via **kwargs
+# from a config dict). `messages` and `tools` are method parameters, so
+# Python's arg dispatcher catches duplicates before our guard runs. We
+# guard `model` explicitly because the orchestrator could accidentally
+# splat a config dict containing a stale model name.
+_RESERVED_KWARGS = frozenset({"model"})
+
+
+@dataclass
+class ToolCall:
+    """A structured tool invocation from the LLM.
+
+    Note: arguments is ALWAYS a parsed dict, never a JSON string. Groq's raw
+    API returns arguments as a JSON-encoded string; chat_with_tools()
+    is responsible for json.loads()-ing it before constructing the ToolCall.
+
+    For Gemini, `id` is synthesized client-side (Gemini doesn't issue them).
+    The id is INTERNAL to the orchestrator's bookkeeping — Gemini's API
+    keys tool responses by `name`, not `id`, so we don't round-trip it.
+    """
+    id: str          # Provider-issued (Groq) OR client-synthesized (Gemini)
+    name: str        # Tool function name (matches a key in TOOL_REGISTRY)
+    arguments: dict  # Already-parsed kwargs dict
+
+
+@dataclass
+class ToolResponse:
+    """A response from chat_with_tools(). Exactly one of:
+    - content is set, tool_calls is empty → model produced a final answer
+    - content is None, tool_calls has items → model requested tool invocations
+    """
+    content: str | None
+    tool_calls: list[ToolCall]
+
+
+def _check_reserved_kwargs(kwargs: dict) -> None:
+    """Raise ValueError if caller passed any kwarg that would clobber a
+    contract-defined field of chat_with_tools()."""
+    bad = _RESERVED_KWARGS & set(kwargs)
+    if bad:
+        raise ValueError(
+            f"chat_with_tools(): cannot override reserved kwargs {sorted(bad)}; "
+            f"use the method's named parameters instead."
+        )
 
 
 class LLMClient(Protocol):
@@ -19,7 +71,7 @@ class LLMClient(Protocol):
         messages: list[dict],
         tools: list[dict],
         **kwargs,
-    ) -> "ToolResponse": ...
+    ) -> ToolResponse: ...
 
 
 class GroqClient:
@@ -47,7 +99,7 @@ class GroqClient:
             except requests.HTTPError as exc:
                 last_exc = exc
                 status = getattr(exc.response, "status_code", None)
-                if status in (429, 500, 502, 503, 504) and attempt < self.MAX_ATTEMPTS - 1:
+                if status in _RETRYABLE_STATUS and attempt < self.MAX_ATTEMPTS - 1:
                     time.sleep(self._sleep_seconds(exc.response, attempt))
                     continue
                 raise
@@ -70,28 +122,36 @@ class GroqClient:
         messages: list[dict],
         tools: list[dict],
         **kwargs,
-    ) -> "ToolResponse":
+    ) -> ToolResponse:
         """Call Groq's chat completions API with the tools= parameter.
         Returns a ToolResponse — either content (final answer) or tool_calls
-        (parsed arguments dict, not JSON string)."""
+        (parsed arguments dict, not JSON string).
+
+        kwargs may include `temperature`, `max_tokens`, `tool_choice`, etc.
+        but MAY NOT override `model`, `messages`, or `tools` (raises ValueError).
+
+        Retries ONLY on retryable statuses (429/5xx). 4xx (e.g., bad auth, malformed
+        tool schema) raises immediately — retrying won't help and burns time.
+        """
+        _check_reserved_kwargs(kwargs)
         payload = {
             "model": self._model,
             "messages": messages,
             "tools": tools,
             "tool_choice": "auto",
+            **kwargs,  # tool_choice override allowed (e.g., "required")
         }
-        # Allow caller to override via kwargs (max_tokens, temperature, etc.)
-        payload.update(kwargs)
 
         # NOTE: attrs are _api_key and _model (underscore-prefixed) on the
         # existing GroqClient — not api_key/model. Don't drift.
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+        }
+        last_response = None
         for attempt in range(self.MAX_ATTEMPTS):
-            response = requests.post(
-                self.URL,
-                headers={"Authorization": f"Bearer {self._api_key}"},
-                json=payload,
-                timeout=60,
-            )
+            response = requests.post(self.URL, headers=headers, json=payload, timeout=60)
+            last_response = response
             if response.status_code == 200:
                 msg = response.json()["choices"][0]["message"]
                 content = msg.get("content")
@@ -105,9 +165,14 @@ class GroqClient:
                     for tc in raw_tool_calls
                 ]
                 return ToolResponse(content=content, tool_calls=tool_calls)
-            # On non-200, sleep + retry using existing _sleep_seconds helper
-            time.sleep(self._sleep_seconds(response, attempt))
-        response.raise_for_status()
+            # Only retry on retryable statuses; otherwise raise immediately.
+            if response.status_code in _RETRYABLE_STATUS and attempt < self.MAX_ATTEMPTS - 1:
+                time.sleep(self._sleep_seconds(response, attempt))
+                continue
+            response.raise_for_status()
+        # Loop exhausted on retryable status; raise final response's error.
+        if last_response is not None:
+            last_response.raise_for_status()
 
 
 class GeminiClient:
@@ -188,7 +253,7 @@ class GeminiClient:
             except requests.HTTPError as exc:
                 last_exc = exc
                 status = getattr(exc.response, "status_code", None)
-                if status in (429, 500, 502, 503, 504) and attempt < self.MAX_ATTEMPTS - 1:
+                if status in _RETRYABLE_STATUS and attempt < self.MAX_ATTEMPTS - 1:
                     time.sleep(self._sleep_seconds(exc.response, attempt))
                     continue
                 raise
@@ -210,11 +275,19 @@ class GeminiClient:
         messages: list[dict],
         tools: list[dict],
         **kwargs,
-    ) -> "ToolResponse":
+    ) -> ToolResponse:
         """Call Gemini's generateContent with function-call tools.
         Synthesizes call IDs (Gemini doesn't issue them) so downstream
-        code can use call.id uniformly."""
-        from uuid import uuid4
+        code can use call.id uniformly. The id is INTERNAL to orchestrator
+        bookkeeping — Gemini's tool responses are keyed by `name`, not `id`,
+        so we don't round-trip it.
+
+        kwargs may include `temperature`, `max_tokens`, etc. but MAY NOT
+        override `model`, `messages`, or `tools` (raises ValueError).
+
+        Retries ONLY on retryable statuses (429/5xx). 4xx raises immediately.
+        """
+        _check_reserved_kwargs(kwargs)
 
         # Gemini's tools format uses functionDeclarations.
         # NOTE: attrs are _api_key and _model (underscore-prefixed) on the
@@ -224,22 +297,32 @@ class GeminiClient:
         else:
             gemini_tools = [{"functionDeclarations": [t["function"] for t in tools]}]
 
-        payload = {
-            "contents": self._to_gemini_format(messages)["contents"],
+        # Preserve system_instruction routing from _to_gemini_format
+        gemini_payload = self._to_gemini_format(messages)
+        payload: dict = {
+            "contents": gemini_payload["contents"],
             "tools": gemini_tools,
         }
+        if "system_instruction" in gemini_payload:
+            payload["system_instruction"] = gemini_payload["system_instruction"]
         payload.update(kwargs)
 
+        url = self.URL.format(model=self._model)
+        last_response = None
         for attempt in range(self.MAX_ATTEMPTS):
             self._throttle()
             response = requests.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/{self._model}:generateContent",
+                url,
                 params={"key": self._api_key},
                 json=payload,
                 timeout=60,
             )
-            # Scrub URL key from any future error messages
-            response.url = response.url.split("?")[0] + "?key=[REDACTED]"
+            self._last_call_monotonic = time.monotonic()
+            # Guarded scrub — only mutate if the URL actually has the key.
+            if "?key=" in response.url or "&key=" in response.url:
+                response.url = response.url.split("?")[0] + "?key=[REDACTED]"
+            last_response = response
+
             if response.status_code == 200:
                 data = response.json()
                 content = None
@@ -251,36 +334,15 @@ class GeminiClient:
                     elif "functionCall" in part:
                         fc = part["functionCall"]
                         tool_calls.append(ToolCall(
-                            id=f"gemini-call-{uuid4().hex[:8]}",
+                            id=f"gemini-call-{uuid4().hex}",  # full 32 hex chars
                             name=fc["name"],
                             arguments=fc.get("args", {}),  # Gemini returns dict, not string
                         ))
                 return ToolResponse(content=content, tool_calls=tool_calls)
-            time.sleep(self._sleep_seconds(response, attempt))
-        response.raise_for_status()
-
-
-from dataclasses import dataclass
-
-
-@dataclass
-class ToolCall:
-    """A structured tool invocation from the LLM.
-
-    Note: arguments is ALWAYS a parsed dict, never a JSON string. Groq's raw
-    API returns arguments as a JSON-encoded string; chat_with_tools()
-    is responsible for json.loads()-ing it before constructing the ToolCall.
-    """
-    id: str          # Provider-issued ID; for Gemini, synthesized by the client
-    name: str        # Tool function name (matches a key in TOOL_REGISTRY)
-    arguments: dict  # Already-parsed kwargs dict
-
-
-@dataclass
-class ToolResponse:
-    """A response from chat_with_tools(). Exactly one of:
-    - content is set, tool_calls is empty → model produced a final answer
-    - content is None, tool_calls has items → model requested tool invocations
-    """
-    content: str | None
-    tool_calls: list[ToolCall]
+            # Only retry on retryable statuses; otherwise raise immediately.
+            if response.status_code in _RETRYABLE_STATUS and attempt < self.MAX_ATTEMPTS - 1:
+                time.sleep(self._sleep_seconds(response, attempt))
+                continue
+            response.raise_for_status()
+        if last_response is not None:
+            last_response.raise_for_status()
