@@ -153,3 +153,108 @@ class TestRetryBudgetAndStepCeiling:
         result = orch.run("Q")
         assert result.error == "max_steps_reached"
         assert result.steps_taken == Orchestrator.MAX_STEPS
+
+
+class TestTerminationSemantics:
+    """I-1 + M-7 fixes from code-quality review."""
+
+    def test_empty_content_returns_distinct_error_not_max_steps(self, tmp_path, mocker):
+        """I-1: a model returning content=None + tool_calls=[] should NOT
+        burn through 10 steps and report max_steps_reached. The eval's
+        failure-mode breakdown needs 'empty_response' to be distinguishable."""
+        from multitool.orchestrator import Orchestrator
+        from multitool.llm_client import ToolResponse
+        from multitool.trace import Trace
+
+        mock_llm = mocker.MagicMock()
+        mock_llm.chat_with_tools.return_value = ToolResponse(
+            content=None,
+            tool_calls=[],
+        )
+
+        trace = Trace(directory=str(tmp_path), question="Q", provider="g", model="m")
+        orch = Orchestrator(llm=mock_llm, trace=trace)
+        result = orch.run("Q")
+
+        assert result.error == "empty_response"
+        assert result.error != "max_steps_reached"
+        assert result.steps_taken == 1  # Exit immediately, not after 10
+        # Critical: only ONE LLM call, not 10
+        assert mock_llm.chat_with_tools.call_count == 1
+
+    def test_empty_string_content_treated_as_final_answer(self, tmp_path, mocker):
+        """I-1 corollary: content="" is a real (if unhelpful) response — return
+        it as the final answer. The eval scorer will mark it wrong, but the
+        failure mode is 'empty answer' not 'agent failed to terminate'."""
+        from multitool.orchestrator import Orchestrator
+        from multitool.llm_client import ToolResponse
+        from multitool.trace import Trace
+
+        mock_llm = mocker.MagicMock()
+        mock_llm.chat_with_tools.return_value = ToolResponse(
+            content="",
+            tool_calls=[],
+        )
+
+        trace = Trace(directory=str(tmp_path), question="Q", provider="g", model="m")
+        orch = Orchestrator(llm=mock_llm, trace=trace)
+        result = orch.run("Q")
+
+        assert result.answer == ""
+        assert result.error is None
+        assert result.steps_taken == 1
+
+    def test_multiple_tool_calls_in_one_step(self, tmp_path, mocker):
+        """M-7: model returns 2 tool_calls in a single response.
+        Verify all dispatch correctly + trace groups them under same step."""
+        from multitool.orchestrator import Orchestrator
+        from multitool.llm_client import ToolResponse, ToolCall
+        from multitool.tools import TOOL_REGISTRY
+        from multitool.trace import Trace
+        import json
+        from pathlib import Path
+
+        TOOL_REGISTRY["echo_a"] = {"fn": lambda x: f"A:{x}", "schema": {}}
+        TOOL_REGISTRY["echo_b"] = {"fn": lambda x: f"B:{x}", "schema": {}}
+
+        # Step 0: 2 parallel tool calls. Step 1: final answer.
+        responses = [
+            ToolResponse(content=None, tool_calls=[
+                ToolCall(id="t1", name="echo_a", arguments={"x": "alpha"}),
+                ToolCall(id="t2", name="echo_b", arguments={"x": "beta"}),
+            ]),
+            ToolResponse(content="Done", tool_calls=[]),
+        ]
+        mock_llm = mocker.MagicMock()
+        mock_llm.chat_with_tools.side_effect = responses
+
+        trace = Trace(directory=str(tmp_path), question="Q", provider="g", model="m")
+        orch = Orchestrator(llm=mock_llm, trace=trace)
+        result = orch.run("Q")
+
+        assert result.answer == "Done"
+        assert len(result.tool_calls) == 2
+        assert result.tool_calls[0]["result"] == "A:alpha"
+        assert result.tool_calls[1]["result"] == "B:beta"
+
+        # Trace: both calls should be grouped under step 0, not split across steps
+        data = json.loads(Path(trace.path).read_text())
+        step_0 = data["steps"][0]
+        assert step_0["step"] == 0
+        assert len(step_0["tool_calls"]) == 2
+        assert len(step_0["results"]) == 2
+
+    def test_hallucinated_tool_fast_paths_to_error(self, tmp_path, mocker):
+        """M-5: model picks a tool name not in TOOL_REGISTRY.
+        Should return error string without burning 3 KeyError attempts."""
+        from multitool.orchestrator import Orchestrator
+        from multitool.llm_client import ToolCall
+        from multitool.trace import Trace
+
+        trace = Trace(directory=str(tmp_path), question="Q", provider="g", model="m")
+        orch = Orchestrator(llm=mocker.MagicMock(), trace=trace)
+
+        call = ToolCall(id="x", name="this_tool_does_not_exist", arguments={})
+        result = orch._dispatch_with_retry(call)
+        assert "unknown tool" in result
+        assert "this_tool_does_not_exist" in result

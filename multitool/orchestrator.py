@@ -1,7 +1,6 @@
 """The agent loop. Function-calling-native; per-tool retry budget; step ceiling."""
 import json
-import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from multitool.llm_client import LLMClient, ToolCall, ToolResponse
 from multitool.tools import TOOL_REGISTRY
@@ -21,7 +20,7 @@ class AgentResult:
     answer: str | None
     steps_taken: int
     tool_calls: list[dict]      # Flat log of every tool invocation for eval scoring
-    error: str | None           # 'max_steps_reached' / 'tool_failed_permanently' / None
+    error: str | None           # 'max_steps_reached' / 'empty_response' / None
     trace_path: str
 
 
@@ -41,6 +40,11 @@ class Orchestrator:
         unit_convert) flow through here unchanged — no retry, the string IS
         the Observation. Tools that RAISE (tavily_search, wikipedia) trigger
         the retry path, then surface as Observation on permanent failure."""
+        # Fast-path: if the model hallucinated a tool name (rare with function-calling
+        # but possible), don't burn the retry budget on a guaranteed KeyError.
+        if call.name not in TOOL_REGISTRY:
+            return f"Tool error: unknown tool {call.name!r}"
+
         for attempt in range(self.MAX_TOOL_RETRIES + 1):
             try:
                 fn = TOOL_REGISTRY[call.name]["fn"]
@@ -59,18 +63,39 @@ class Orchestrator:
             {"role": "user", "content": question},
         ]
         tool_calls_log: list[dict] = []
+        # Schemas are fixed at run start (TOOL_REGISTRY doesn't mutate during a run).
+        # Hoist out of the loop to signal this and avoid recomputing 10x.
+        tools = self._all_schemas()
 
         for step in range(self.MAX_STEPS):
-            response = self.llm.chat_with_tools(messages, tools=self._all_schemas())
+            response = self.llm.chat_with_tools(messages, tools=tools)
 
-            # Termination: content + no tool_calls = final answer
-            if response.content and not response.tool_calls:
+            # Three-way termination check (explicit, not truthy fallthrough):
+            # 1. tool_calls present → dispatch path
+            # 2. content is not None (including "") → final answer
+            # 3. neither → model produced nothing usable, log + exit
+            if response.tool_calls:
+                pass  # fall through to dispatch
+            elif response.content is not None:
+                # Final answer (possibly empty string — that's still a real response)
                 self.trace.log_final(step, response.content)
                 return AgentResult(
                     answer=response.content,
                     steps_taken=step + 1,
                     tool_calls=tool_calls_log,
                     error=None,
+                    trace_path=self.trace.path,
+                )
+            else:
+                # Both content and tool_calls are empty — model produced nothing.
+                # Distinguishes "empty response" from "max_steps_reached" in the
+                # eval's failure-mode breakdown.
+                self.trace.log_error("empty_response")
+                return AgentResult(
+                    answer=None,
+                    steps_taken=step + 1,
+                    tool_calls=tool_calls_log,
+                    error="empty_response",
                     trace_path=self.trace.path,
                 )
 
