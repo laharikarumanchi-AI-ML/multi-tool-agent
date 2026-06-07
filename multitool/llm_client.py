@@ -13,6 +13,12 @@ import requests
 
 class LLMClient(Protocol):
     def chat(self, messages: list[dict], **kwargs) -> str: ...
+    def chat_with_tools(
+        self,
+        messages: list[dict],
+        tools: list[dict],
+        **kwargs,
+    ) -> "ToolResponse": ...
 
 
 class GroqClient:
