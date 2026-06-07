@@ -7,6 +7,7 @@ with this attribution header. The original lives at:
 Extended here with chat_with_tools() for function-calling-native agent loops.
 """
 from typing import Protocol
+import json
 import time
 import requests
 
@@ -63,6 +64,50 @@ class GroqClient:
                 except (TypeError, ValueError):
                     pass
         return min(self.BACKOFF_BASE_SECONDS * (2 ** attempt), self.MAX_BACKOFF_SECONDS)
+
+    def chat_with_tools(
+        self,
+        messages: list[dict],
+        tools: list[dict],
+        **kwargs,
+    ) -> "ToolResponse":
+        """Call Groq's chat completions API with the tools= parameter.
+        Returns a ToolResponse — either content (final answer) or tool_calls
+        (parsed arguments dict, not JSON string)."""
+        payload = {
+            "model": self._model,
+            "messages": messages,
+            "tools": tools,
+            "tool_choice": "auto",
+        }
+        # Allow caller to override via kwargs (max_tokens, temperature, etc.)
+        payload.update(kwargs)
+
+        # NOTE: attrs are _api_key and _model (underscore-prefixed) on the
+        # existing GroqClient — not api_key/model. Don't drift.
+        for attempt in range(self.MAX_ATTEMPTS):
+            response = requests.post(
+                self.URL,
+                headers={"Authorization": f"Bearer {self._api_key}"},
+                json=payload,
+                timeout=60,
+            )
+            if response.status_code == 200:
+                msg = response.json()["choices"][0]["message"]
+                content = msg.get("content")
+                raw_tool_calls = msg.get("tool_calls") or []
+                tool_calls = [
+                    ToolCall(
+                        id=tc["id"],
+                        name=tc["function"]["name"],
+                        arguments=json.loads(tc["function"]["arguments"]),
+                    )
+                    for tc in raw_tool_calls
+                ]
+                return ToolResponse(content=content, tool_calls=tool_calls)
+            # On non-200, sleep + retry using existing _sleep_seconds helper
+            time.sleep(self._sleep_seconds(response, attempt))
+        response.raise_for_status()
 
 
 class GeminiClient:
