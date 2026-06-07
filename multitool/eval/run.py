@@ -1,5 +1,6 @@
 """Eval runner. Loads test set, runs agent on each query, scores, checkpoints
-after every task (resumable on quota crash, like DA Agent's eval)."""
+after every task (for inspection — re-running starts fresh; manually filter
+completed ids if you need to resume)."""
 import json
 import os
 import sys
@@ -31,7 +32,9 @@ def run_eval(
 
     Returns summary: {total_attempted, total_passed, pass_rate}.
 
-    Checkpoint format (overwritten after every task):
+    Checkpoint format (overwritten after every task — checkpointed for
+    inspection only; re-running starts fresh, manually filter completed ids
+    if you need to resume):
       {
         "started_at": ISO,
         "results": [{id, question, passed, predicted, gold, ...}],
@@ -89,7 +92,11 @@ def run_eval(
         summary["total_passed"] = sum(1 for r in results if r["passed"])
         checkpoint()
 
-    summary["pass_rate"] = summary["total_passed"] / summary["total_attempted"]
+    summary["pass_rate"] = (
+        summary["total_passed"] / summary["total_attempted"]
+        if summary["total_attempted"]
+        else 0.0
+    )
     summary["finished_at"] = datetime.now(timezone.utc).isoformat()
     checkpoint()
     return summary

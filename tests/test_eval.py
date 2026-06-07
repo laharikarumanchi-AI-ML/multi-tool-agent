@@ -29,6 +29,13 @@ class TestParseNumber:
         from multitool.eval.scorer import _parse_number
         assert _parse_number("1.5e9 people") == 1.5e9
 
+    def test_parses_unformatted_4plus_digit_numbers(self):
+        """Regression: pre-fix regex truncated '10000' to '100'."""
+        from multitool.eval.scorer import _parse_number
+        assert _parse_number("10000") == 10000.0
+        assert _parse_number("8336817") == 8336817.0
+        assert _parse_number("population is 1234567") == 1234567.0
+
 
 class TestScore:
 
@@ -58,6 +65,14 @@ class TestScore:
         r = score(predicted="thursday", gold="Thursday", kind="string")
         assert r["passed"] is True
 
+    def test_numeric_tolerance_none_means_exact_match(self):
+        """Regression: tolerance=None previously crashed with TypeError."""
+        from multitool.eval.scorer import score
+        result = score(predicted="5", gold=5.0, kind="numeric", tolerance=None)
+        assert result["passed"] is True
+        result2 = score(predicted="5.1", gold=5.0, kind="numeric", tolerance=None)
+        assert result2["passed"] is False
+
 
 class TestRunner:
 
@@ -73,3 +88,19 @@ class TestRunner:
         assert len(queries) == 2
         assert queries[0]["id"] == "q01"
         assert queries[1]["answer_kind"] == "string"
+
+
+class TestRunEval:
+
+    def test_empty_queries_does_not_crash(self, tmp_path):
+        """Regression: empty queries previously hit ZeroDivisionError."""
+        from multitool.eval.run import run_eval
+        results_path = tmp_path / "results.json"
+
+        def factory():
+            raise AssertionError("factory should not be called for empty queries")
+
+        summary = run_eval([], factory, str(results_path))
+        assert summary["total_attempted"] == 0
+        assert summary["total_passed"] == 0
+        assert summary["pass_rate"] == 0.0

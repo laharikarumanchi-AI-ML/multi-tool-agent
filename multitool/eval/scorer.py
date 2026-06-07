@@ -8,7 +8,7 @@ from typing import Any
 # Matches first float-or-int in a string. Handles negatives, commas,
 # scientific notation. Doesn't match numbers embedded in words.
 _NUMBER_RE = re.compile(
-    r"(?<![A-Za-z])-?\d{1,3}(?:,\d{3})*(?:\.\d+)?(?:[eE][+-]?\d+)?"
+    r"(?<![A-Za-z])-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?:[eE][+-]?\d+)?"
 )
 
 
@@ -37,6 +37,8 @@ def score(
       - "list":   set comparison
     """
     if kind == "numeric":
+        if tolerance is None:
+            tolerance = 0.0
         parsed = _parse_number(predicted)
         if parsed is None:
             return {"passed": False, "predicted": predicted, "parse_error": "no_number_found"}
