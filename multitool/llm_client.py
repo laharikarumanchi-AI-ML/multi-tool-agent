@@ -153,3 +153,29 @@ class GeminiClient:
                 except (TypeError, ValueError):
                     pass
         return min(self.BACKOFF_BASE_SECONDS * (2 ** attempt), self.MAX_BACKOFF_SECONDS)
+
+
+from dataclasses import dataclass
+
+
+@dataclass
+class ToolCall:
+    """A structured tool invocation from the LLM.
+
+    Note: arguments is ALWAYS a parsed dict, never a JSON string. Groq's raw
+    API returns arguments as a JSON-encoded string; chat_with_tools()
+    is responsible for json.loads()-ing it before constructing the ToolCall.
+    """
+    id: str          # Provider-issued ID; for Gemini, synthesized by the client
+    name: str        # Tool function name (matches a key in TOOL_REGISTRY)
+    arguments: dict  # Already-parsed kwargs dict
+
+
+@dataclass
+class ToolResponse:
+    """A response from chat_with_tools(). Exactly one of:
+    - content is set, tool_calls is empty → model produced a final answer
+    - content is None, tool_calls has items → model requested tool invocations
+    """
+    content: str | None
+    tool_calls: list[ToolCall]
