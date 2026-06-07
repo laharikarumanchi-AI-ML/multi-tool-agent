@@ -55,3 +55,47 @@ class TestDispatchWithRetry:
         result = orch._dispatch_with_retry(call)
         assert "Tool error" in result
         assert "boom" in result
+
+
+class TestOrchestratorRun:
+
+    def test_returns_final_answer_when_model_responds_with_content(self, tmp_path, mocker):
+        """If first LLM call returns content (no tool_calls), that's the final answer."""
+        from multitool.orchestrator import Orchestrator
+        from multitool.llm_client import ToolResponse
+        from multitool.trace import Trace
+
+        mock_llm = mocker.MagicMock()
+        mock_llm.chat_with_tools.return_value = ToolResponse(content="2+2=4", tool_calls=[])
+
+        trace = Trace(directory=str(tmp_path), question="What is 2+2?", provider="g", model="m")
+        orch = Orchestrator(llm=mock_llm, trace=trace)
+        result = orch.run("What is 2+2?")
+
+        assert result.answer == "2+2=4"
+        assert result.steps_taken == 1
+        assert result.error is None
+
+    def test_max_steps_reached_returns_error(self, tmp_path, mocker):
+        """If model keeps calling tools and never answers, exit with max_steps_reached."""
+        from multitool.orchestrator import Orchestrator
+        from multitool.llm_client import ToolResponse, ToolCall
+        from multitool.tools import TOOL_REGISTRY
+        from multitool.trace import Trace
+
+        TOOL_REGISTRY["echo"] = {"fn": lambda x: f"echoed:{x}", "schema": {}}
+
+        mock_llm = mocker.MagicMock()
+        # Always return a tool_call, never content
+        mock_llm.chat_with_tools.return_value = ToolResponse(
+            content=None,
+            tool_calls=[ToolCall(id="1", name="echo", arguments={"x": "loop"})],
+        )
+
+        trace = Trace(directory=str(tmp_path), question="Q", provider="g", model="m")
+        orch = Orchestrator(llm=mock_llm, trace=trace)
+        result = orch.run("Q")
+
+        assert result.answer is None
+        assert result.error == "max_steps_reached"
+        assert result.steps_taken == Orchestrator.MAX_STEPS
