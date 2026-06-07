@@ -99,3 +99,57 @@ class TestOrchestratorRun:
         assert result.answer is None
         assert result.error == "max_steps_reached"
         assert result.steps_taken == Orchestrator.MAX_STEPS
+
+
+class TestRetryBudgetAndStepCeiling:
+    """Verify the spec §3.6 'repeated-failed-call loop' decision: per-dispatch
+    retry resets each step; step ceiling is the backstop."""
+
+    def test_per_dispatch_retry_budget_resets_each_step(self, tmp_path, mocker):
+        """Each step starts with a fresh MAX_TOOL_RETRIES budget."""
+        from multitool.orchestrator import Orchestrator
+        from multitool.llm_client import ToolResponse, ToolCall
+        from multitool.tools import TOOL_REGISTRY
+        from multitool.trace import Trace
+
+        call_count = {"n": 0}
+        def counting_fn():
+            call_count["n"] += 1
+            raise RuntimeError("always fails")
+        TOOL_REGISTRY["fail_tool"] = {"fn": counting_fn, "schema": {}}
+
+        mock_llm = mocker.MagicMock()
+        mock_llm.chat_with_tools.return_value = ToolResponse(
+            content=None,
+            tool_calls=[ToolCall(id="1", name="fail_tool", arguments={})],
+        )
+
+        trace = Trace(directory=str(tmp_path), question="Q", provider="g", model="m")
+        orch = Orchestrator(llm=mock_llm, trace=trace)
+        orch.run("Q")
+        # 10 steps × 3 attempts per dispatch = 30 fn invocations
+        assert call_count["n"] == Orchestrator.MAX_STEPS * (Orchestrator.MAX_TOOL_RETRIES + 1)
+
+    def test_repeated_same_call_terminates_at_step_ceiling(self, tmp_path, mocker):
+        """Model can loop on same (name, args) all day; we just exit cleanly at MAX_STEPS."""
+        from multitool.orchestrator import Orchestrator
+        from multitool.llm_client import ToolResponse, ToolCall
+        from multitool.tools import TOOL_REGISTRY
+        from multitool.trace import Trace
+
+        TOOL_REGISTRY["broken"] = {
+            "fn": lambda: (_ for _ in ()).throw(RuntimeError("nope")),
+            "schema": {},
+        }
+
+        mock_llm = mocker.MagicMock()
+        mock_llm.chat_with_tools.return_value = ToolResponse(
+            content=None,
+            tool_calls=[ToolCall(id="1", name="broken", arguments={})],
+        )
+
+        trace = Trace(directory=str(tmp_path), question="Q", provider="g", model="m")
+        orch = Orchestrator(llm=mock_llm, trace=trace)
+        result = orch.run("Q")
+        assert result.error == "max_steps_reached"
+        assert result.steps_taken == Orchestrator.MAX_STEPS
