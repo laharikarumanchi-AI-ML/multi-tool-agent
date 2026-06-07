@@ -113,3 +113,34 @@ class TestGroqChatWithTools:
         result = client.chat_with_tools(messages=[], tools=[])
         assert isinstance(result.tool_calls[0].arguments, dict)
         assert result.tool_calls[0].arguments == {"a": 1, "b": "two"}
+
+
+class TestGeminiChatWithTools:
+
+    def test_synthesizes_call_id(self, mocker):
+        """Gemini doesn't issue call IDs; client must synthesize them."""
+        from multitool.llm_client import GeminiClient
+
+        mock_resp = mocker.MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.url = "https://example.com/foo"  # so the scrub line doesn't error
+        mock_resp.json.return_value = {
+            "candidates": [{
+                "content": {
+                    "parts": [{
+                        "functionCall": {
+                            "name": "tavily_search",
+                            "args": {"query": "Chicago"},
+                        }
+                    }]
+                }
+            }]
+        }
+        mocker.patch("multitool.llm_client.requests.post", return_value=mock_resp)
+
+        client = GeminiClient(api_key="dummy")
+        result = client.chat_with_tools(messages=[], tools=[])
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].id.startswith("gemini-call-")
+        assert result.tool_calls[0].name == "tavily_search"
+        assert result.tool_calls[0].arguments == {"query": "Chicago"}  # already dict

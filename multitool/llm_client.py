@@ -205,6 +205,60 @@ class GeminiClient:
                     pass
         return min(self.BACKOFF_BASE_SECONDS * (2 ** attempt), self.MAX_BACKOFF_SECONDS)
 
+    def chat_with_tools(
+        self,
+        messages: list[dict],
+        tools: list[dict],
+        **kwargs,
+    ) -> "ToolResponse":
+        """Call Gemini's generateContent with function-call tools.
+        Synthesizes call IDs (Gemini doesn't issue them) so downstream
+        code can use call.id uniformly."""
+        from uuid import uuid4
+
+        # Gemini's tools format uses functionDeclarations.
+        # NOTE: attrs are _api_key and _model (underscore-prefixed) on the
+        # existing GeminiClient — not api_key/model. Don't drift.
+        if not tools:
+            gemini_tools = []
+        else:
+            gemini_tools = [{"functionDeclarations": [t["function"] for t in tools]}]
+
+        payload = {
+            "contents": self._to_gemini_format(messages)["contents"],
+            "tools": gemini_tools,
+        }
+        payload.update(kwargs)
+
+        for attempt in range(self.MAX_ATTEMPTS):
+            self._throttle()
+            response = requests.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/{self._model}:generateContent",
+                params={"key": self._api_key},
+                json=payload,
+                timeout=60,
+            )
+            # Scrub URL key from any future error messages
+            response.url = response.url.split("?")[0] + "?key=[REDACTED]"
+            if response.status_code == 200:
+                data = response.json()
+                content = None
+                tool_calls = []
+                parts = data["candidates"][0]["content"]["parts"]
+                for part in parts:
+                    if "text" in part:
+                        content = part["text"]
+                    elif "functionCall" in part:
+                        fc = part["functionCall"]
+                        tool_calls.append(ToolCall(
+                            id=f"gemini-call-{uuid4().hex[:8]}",
+                            name=fc["name"],
+                            arguments=fc.get("args", {}),  # Gemini returns dict, not string
+                        ))
+                return ToolResponse(content=content, tool_calls=tool_calls)
+            time.sleep(self._sleep_seconds(response, attempt))
+        response.raise_for_status()
+
 
 from dataclasses import dataclass
 
