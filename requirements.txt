@@ -5,7 +5,7 @@
 # Note: we deliberately do NOT install the multitool package via pip here.
 # HF Spaces mounts requirements.txt at /tmp at install time, but the
 # repo source isn't available yet at that step — so any `-e .` reference
-# fails. Instead, demo/app.py adds the repo root to sys.path explicitly.
+# fails. Instead, app.py adds the repo root to sys.path explicitly.
 
 streamlit>=1.31.0
 requests>=2.31.0
