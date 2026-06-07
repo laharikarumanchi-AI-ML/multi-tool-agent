@@ -57,3 +57,19 @@ class TestScore:
         from multitool.eval.scorer import score
         r = score(predicted="thursday", gold="Thursday", kind="string")
         assert r["passed"] is True
+
+
+class TestRunner:
+
+    def test_load_test_set(self, tmp_path):
+        from multitool.eval.run import load_test_set
+
+        path = tmp_path / "test_set.jsonl"
+        path.write_text(
+            '{"id":"q01","question":"Q1","gold_answer":1.0,"tolerance":0.1,"answer_kind":"numeric","expected_tools":[],"category":"x","difficulty":"easy"}\n'
+            '{"id":"q02","question":"Q2","gold_answer":"hello","tolerance":null,"answer_kind":"string","expected_tools":[],"category":"y","difficulty":"easy"}\n'
+        )
+        queries = load_test_set(str(path))
+        assert len(queries) == 2
+        assert queries[0]["id"] == "q01"
+        assert queries[1]["answer_kind"] == "string"
