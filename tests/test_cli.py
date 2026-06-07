@@ -193,6 +193,57 @@ class TestCliVerboseTrace:
         assert long_result not in captured.err
 
 
+class TestResolveTraceDir:
+    """Verify --trace PATH is treated as a directory (created if missing).
+
+    Regression guard for the foot-gun where ``--trace mytrace`` (no slash,
+    no extension) was passed through ``os.path.dirname("mytrace") == ""``
+    and silently dropped traces into CWD instead of ``mytrace/``."""
+
+    def test_trace_path_is_treated_as_directory_and_created(self, tmp_path):
+        """--trace /path/to/newdir creates newdir and returns it as-is."""
+        target = tmp_path / "newdir"
+        assert not target.exists()
+
+        resolved = cli._resolve_trace_dir(str(target))
+
+        assert resolved == str(target)
+        assert target.is_dir()
+
+    def test_bare_name_trace_path_creates_directory_relative_to_cwd(
+        self, tmp_path, monkeypatch
+    ):
+        """--trace mytrace (no slash) must create ``mytrace/`` relative to
+        CWD, NOT silently fall back to CWD itself (the original foot-gun)."""
+        monkeypatch.chdir(tmp_path)
+
+        resolved = cli._resolve_trace_dir("mytrace")
+
+        assert resolved == "mytrace"
+        assert (tmp_path / "mytrace").is_dir()
+        # The CWD itself must NOT be the resolved directory.
+        assert resolved != "."
+
+    def test_no_trace_path_defaults_to_traces_dir(self, tmp_path, monkeypatch):
+        """No --trace flag → default ``traces/`` directory, created if missing."""
+        monkeypatch.chdir(tmp_path)
+
+        resolved = cli._resolve_trace_dir(None)
+
+        assert resolved == "traces"
+        assert (tmp_path / "traces").is_dir()
+
+    def test_existing_trace_dir_is_idempotent(self, tmp_path):
+        """Re-resolving an existing dir does not error (exist_ok semantics)."""
+        target = tmp_path / "already_here"
+        target.mkdir()
+
+        resolved = cli._resolve_trace_dir(str(target))
+
+        assert resolved == str(target)
+        assert target.is_dir()
+
+
 class TestCliMaxStepsReached:
     """Tests for the max-steps-reached failure path."""
 

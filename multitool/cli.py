@@ -27,6 +27,21 @@ from typing import Optional
 _TRUNCATE_RESULT_AT = 200  # chars; verbose tool-call log shouldn't dump full results
 
 
+def _resolve_trace_dir(trace_path: Optional[str]) -> str:
+    """Resolve and ensure the trace directory exists.
+
+    ``--trace PATH`` is ALWAYS treated as a directory. If the user passes
+    ``--trace mytrace``, traces land in ``mytrace/``, not CWD. This avoids
+    the foot-gun where ``os.path.dirname("mytrace")`` returns ``""`` and
+    traces silently drop into the current working directory.
+
+    The directory is created if missing (both for the user-supplied path
+    and the default ``traces/``)."""
+    trace_dir = trace_path if trace_path else "traces"
+    os.makedirs(trace_dir, exist_ok=True)
+    return trace_dir
+
+
 def _run_agent(
     question: str,
     provider: str,
@@ -62,12 +77,11 @@ def _run_agent(
         # argparse `choices=` already prevents this, but belt-and-suspenders.
         raise ValueError(f"Unknown provider: {provider!r}")
 
-    # Trace directory: parent of --trace path if specified, else default "traces/".
+    # Trace directory resolution: --trace PATH is always treated as a directory
+    # (created if missing). See _resolve_trace_dir for the foot-gun this avoids.
     # The Trace class always derives its own run_id-based filename inside the
     # directory; --trace lets the user redirect WHERE traces land, not rename them.
-    trace_dir = os.path.dirname(trace_path) if trace_path else "traces"
-    if not trace_dir:
-        trace_dir = "."
+    trace_dir = _resolve_trace_dir(trace_path)
     trace = Trace(
         directory=trace_dir,
         question=question,
@@ -114,8 +128,8 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="trace_path",
         default=None,
         metavar="PATH",
-        help="Directory (or file path whose directory will be used) to write the JSON trace into. "
-             "Default: ./traces/",
+        help="Directory to write trace JSON files into (one file per run, named "
+             "<run_id>.json). Created if it doesn't exist. Default: traces/",
     )
     ask.add_argument(
         "-v", "--verbose",
