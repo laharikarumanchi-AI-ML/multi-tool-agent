@@ -186,6 +186,23 @@ class GroqClient:
                     for tc in raw_tool_calls
                 ]
                 return ToolResponse(content=content, tool_calls=tool_calls)
+            # Groq-specific: HTTP 400 with code='tool_use_failed' means the
+            # MODEL produced malformed function-call syntax (raw Python like
+            # `pint.Quantity(...)` in arguments, or multiple non-JSON
+            # `<function=...>` blocks in one message). The request itself
+            # is valid — Groq's server-side parser couldn't extract a
+            # function call from what the model emitted. Retrying is
+            # often productive because the model's next sample may parse
+            # cleanly, so treat this as a soft, retryable error (capped
+            # at MAX_ATTEMPTS like the other retryable statuses).
+            if (
+                response.status_code == 400
+                and self._is_tool_use_failed(response)
+                and attempt < self.MAX_ATTEMPTS - 1
+            ):
+                _log_http_error_body(response, "Groq.chat_with_tools (tool_use_failed, retrying)")
+                time.sleep(self._sleep_seconds(response, attempt))
+                continue
             # Only retry on retryable statuses; otherwise raise immediately.
             if response.status_code in _RETRYABLE_STATUS and attempt < self.MAX_ATTEMPTS - 1:
                 time.sleep(self._sleep_seconds(response, attempt))
@@ -196,6 +213,17 @@ class GroqClient:
         if last_response is not None:
             _log_http_error_body(last_response, "Groq.chat_with_tools")
             last_response.raise_for_status()
+
+    @staticmethod
+    def _is_tool_use_failed(response) -> bool:
+        """True iff the response is Groq's `tool_use_failed` 400 (model
+        emitted unparseable function-call syntax). Safe on any response —
+        returns False for non-JSON bodies or any other error code."""
+        try:
+            err = response.json().get("error") or {}
+        except ValueError:
+            return False
+        return err.get("code") == "tool_use_failed"
 
 
 class GeminiClient:
