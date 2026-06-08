@@ -130,13 +130,8 @@ class GroqClient:
         kwargs may include `temperature`, `max_tokens`, `tool_choice`, etc.
         but MAY NOT override `model`, `messages`, or `tools` (raises ValueError).
 
-        Retries on retryable statuses (429/5xx). Most 4xx (e.g., bad auth, malformed
+        Retries ONLY on retryable statuses (429/5xx). 4xx (e.g., bad auth, malformed
         tool schema) raises immediately — retrying won't help and burns time.
-
-        Special case: Groq returns HTTP 400 with `error.code == "tool_use_failed"`
-        when the model itself emits unparseable function-call syntax (e.g., raw
-        Python expressions as arguments). That IS retried on the same budget —
-        the next sample frequently parses cleanly.
         """
         _check_reserved_kwargs(kwargs)
         payload = {
