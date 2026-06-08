@@ -99,10 +99,13 @@ class Orchestrator:
                     trace_path=self.trace.path,
                 )
 
-            # Append assistant message with tool_calls to history
-            messages.append({
+            # Append assistant message with tool_calls to history.
+            # Mirrors what the OpenAI Python SDK emits: omit `content` when
+            # it's None and tool_calls are present (the OpenAI spec also
+            # accepts `content: null` here, but omitting it is the canonical
+            # shape and avoids any provider-specific edge cases).
+            assistant_msg: dict = {
                 "role": "assistant",
-                "content": response.content,
                 "tool_calls": [
                     {
                         "id": tc.id,
@@ -111,7 +114,10 @@ class Orchestrator:
                     }
                     for tc in response.tool_calls
                 ],
-            })
+            }
+            if response.content is not None:
+                assistant_msg["content"] = response.content
+            messages.append(assistant_msg)
 
             for call in response.tool_calls:
                 result = self._dispatch_with_retry(call)
