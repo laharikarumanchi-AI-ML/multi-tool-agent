@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Protocol
 from uuid import uuid4
 import json
+import sys
 import time
 import requests
 
@@ -53,6 +54,25 @@ class ToolResponse:
     tool_calls: list[ToolCall]
 
 
+def _log_http_error_body(response, source: str) -> None:
+    """If the response is a 4xx/5xx, print the body to stderr before the
+    caller raises. Groq's `raise_for_status()` discards the JSON error body,
+    which made multi-turn tool-call bugs invisible — this restores visibility.
+
+    Truncates at 2000 chars to keep stderr tidy on giant payloads.
+    """
+    if response is None or response.ok:
+        return
+    try:
+        body = response.text[:2000]
+    except Exception:
+        body = "<unreadable body>"
+    print(
+        f"[llm_client] {source} HTTP {response.status_code}: {body}",
+        file=sys.stderr,
+    )
+
+
 def _check_reserved_kwargs(kwargs: dict) -> None:
     """Raise ValueError if caller passed any kwarg that would clobber a
     contract-defined field of chat_with_tools()."""
@@ -94,6 +114,7 @@ class GroqClient:
         for attempt in range(self.MAX_ATTEMPTS):
             try:
                 resp = requests.post(self.URL, headers=headers, json=payload, timeout=60)
+                _log_http_error_body(resp, "Groq.chat")
                 resp.raise_for_status()
                 return resp.json()["choices"][0]["message"]["content"]
             except requests.HTTPError as exc:
@@ -169,9 +190,11 @@ class GroqClient:
             if response.status_code in _RETRYABLE_STATUS and attempt < self.MAX_ATTEMPTS - 1:
                 time.sleep(self._sleep_seconds(response, attempt))
                 continue
+            _log_http_error_body(response, "Groq.chat_with_tools")
             response.raise_for_status()
         # Loop exhausted on retryable status; raise final response's error.
         if last_response is not None:
+            _log_http_error_body(last_response, "Groq.chat_with_tools")
             last_response.raise_for_status()
 
 
@@ -247,6 +270,7 @@ class GeminiClient:
                 # leaks the key to logs/exceptions/results files. Sanitize first.
                 if "?key=" in resp.url or "&key=" in resp.url:
                     resp.url = resp.url.split("?")[0] + "?key=[REDACTED]"
+                _log_http_error_body(resp, "Gemini.chat")
                 resp.raise_for_status()
                 data = resp.json()
                 return data["candidates"][0]["content"]["parts"][0]["text"]
@@ -343,6 +367,8 @@ class GeminiClient:
             if response.status_code in _RETRYABLE_STATUS and attempt < self.MAX_ATTEMPTS - 1:
                 time.sleep(self._sleep_seconds(response, attempt))
                 continue
+            _log_http_error_body(response, "Gemini.chat_with_tools")
             response.raise_for_status()
         if last_response is not None:
+            _log_http_error_body(last_response, "Gemini.chat_with_tools")
             last_response.raise_for_status()
