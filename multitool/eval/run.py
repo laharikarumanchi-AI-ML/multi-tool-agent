@@ -3,10 +3,8 @@ after every task (for inspection — re-running starts fresh; manually filter
 completed ids if you need to resume)."""
 import json
 import os
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable
 
 from multitool.eval.scorer import score
 

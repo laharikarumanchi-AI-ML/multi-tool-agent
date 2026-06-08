@@ -71,7 +71,7 @@ class TestGroqChatWithTools:
         assert result.tool_calls[0].arguments == {"query": "Chicago population"}  # parsed dict!
 
     def test_returns_content_when_model_answers_directly(self, mocker):
-        from multitool.llm_client import GroqClient, ToolResponse
+        from multitool.llm_client import GroqClient
 
         mock_resp = mocker.MagicMock()
         mock_resp.status_code = 200
@@ -149,7 +149,7 @@ class TestGeminiChatWithTools:
 
     def test_returns_content_when_model_answers_directly(self, mocker):
         """Parallel to Groq's content-path test."""
-        from multitool.llm_client import GeminiClient, ToolResponse
+        from multitool.llm_client import GeminiClient
 
         mock_resp = mocker.MagicMock()
         mock_resp.status_code = 200

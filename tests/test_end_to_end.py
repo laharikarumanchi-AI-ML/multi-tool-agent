@@ -1,5 +1,4 @@
 """End-to-end agent loop with a scripted mock LLM. No real API calls."""
-import pytest
 
 
 class TestEndToEnd:
