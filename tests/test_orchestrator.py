@@ -243,6 +243,89 @@ class TestTerminationSemantics:
         assert len(step_0["tool_calls"]) == 2
         assert len(step_0["results"]) == 2
 
+    def test_assistant_message_omits_content_when_none(self, tmp_path, mocker):
+        """Regression: when the model returns tool_calls with content=None,
+        we omit the `content` field rather than sending `content: null`.
+
+        This mirrors what the OpenAI Python SDK emits for the same case
+        and is the canonical OpenAI-compatible shape. Some OpenAI-compatible
+        providers have been observed to reject `content: null` paired with
+        tool_calls with an opaque HTTP 400; omitting the field sidesteps
+        that entire class of provider-specific edge cases.
+        """
+        from multitool.orchestrator import Orchestrator
+        from multitool.llm_client import ToolResponse, ToolCall
+        from multitool.tools import TOOL_REGISTRY
+        from multitool.trace import Trace
+
+        TOOL_REGISTRY["echo"] = {"fn": lambda x: f"echoed:{x}", "schema": {}}
+
+        captured_messages: list = []
+
+        def fake_chat_with_tools(messages, tools, **kwargs):
+            # Snapshot the messages on the SECOND call (after the tool result
+            # has been appended), where the assistant-with-tool_calls message
+            # is what previously broke Groq.
+            captured_messages.append([dict(m) for m in messages])
+            if len(captured_messages) == 1:
+                return ToolResponse(
+                    content=None,
+                    tool_calls=[ToolCall(id="t1", name="echo", arguments={"x": "hi"})],
+                )
+            return ToolResponse(content="done", tool_calls=[])
+
+        mock_llm = mocker.MagicMock()
+        mock_llm.chat_with_tools.side_effect = fake_chat_with_tools
+
+        trace = Trace(directory=str(tmp_path), question="Q", provider="g", model="m")
+        orch = Orchestrator(llm=mock_llm, trace=trace)
+        orch.run("Q")
+
+        # Second call's messages list must contain the assistant message,
+        # and that message MUST NOT have a `content` key set to None.
+        second_call_messages = captured_messages[1]
+        assistant_msgs = [m for m in second_call_messages if m["role"] == "assistant"]
+        assert len(assistant_msgs) == 1
+        am = assistant_msgs[0]
+        assert "tool_calls" in am
+        # Either `content` is absent OR it's a non-None string. Sending
+        # `content: null` is what triggered the 400.
+        if "content" in am:
+            assert am["content"] is not None, (
+                "assistant message must not send `content: null` when tool_calls "
+                "are present — Groq rejects with HTTP 400"
+            )
+
+    def test_assistant_message_keeps_content_when_string(self, tmp_path, mocker):
+        """If the model returns BOTH content and tool_calls (rare but legal
+        per the OpenAI spec), we must preserve the content string."""
+        from multitool.orchestrator import Orchestrator
+        from multitool.llm_client import ToolResponse, ToolCall
+        from multitool.tools import TOOL_REGISTRY
+        from multitool.trace import Trace
+
+        TOOL_REGISTRY["echo2"] = {"fn": lambda x: f"echoed:{x}", "schema": {}}
+        captured: list = []
+
+        def fake(messages, tools, **kwargs):
+            captured.append([dict(m) for m in messages])
+            if len(captured) == 1:
+                return ToolResponse(
+                    content="thinking...",
+                    tool_calls=[ToolCall(id="t1", name="echo2", arguments={"x": "y"})],
+                )
+            return ToolResponse(content="final", tool_calls=[])
+
+        mock_llm = mocker.MagicMock()
+        mock_llm.chat_with_tools.side_effect = fake
+
+        trace = Trace(directory=str(tmp_path), question="Q", provider="g", model="m")
+        orch = Orchestrator(llm=mock_llm, trace=trace)
+        orch.run("Q")
+
+        am = [m for m in captured[1] if m["role"] == "assistant"][0]
+        assert am.get("content") == "thinking..."
+
     def test_hallucinated_tool_fast_paths_to_error(self, tmp_path, mocker):
         """M-5: model picks a tool name not in TOOL_REGISTRY.
         Should return error string without burning 3 KeyError attempts."""

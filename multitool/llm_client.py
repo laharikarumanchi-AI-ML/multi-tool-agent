@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Protocol
 from uuid import uuid4
 import json
+import sys
 import time
 import requests
 
@@ -53,6 +54,25 @@ class ToolResponse:
     tool_calls: list[ToolCall]
 
 
+def _log_http_error_body(response, source: str) -> None:
+    """If the response is a 4xx/5xx, print the body to stderr before the
+    caller raises. Groq's `raise_for_status()` discards the JSON error body,
+    which made multi-turn tool-call bugs invisible — this restores visibility.
+
+    Truncates at 2000 chars to keep stderr tidy on giant payloads.
+    """
+    if response is None or response.ok:
+        return
+    try:
+        body = response.text[:2000]
+    except Exception:
+        body = "<unreadable body>"
+    print(
+        f"[llm_client] {source} HTTP {response.status_code}: {body}",
+        file=sys.stderr,
+    )
+
+
 def _check_reserved_kwargs(kwargs: dict) -> None:
     """Raise ValueError if caller passed any kwarg that would clobber a
     contract-defined field of chat_with_tools()."""
@@ -94,6 +114,7 @@ class GroqClient:
         for attempt in range(self.MAX_ATTEMPTS):
             try:
                 resp = requests.post(self.URL, headers=headers, json=payload, timeout=60)
+                _log_http_error_body(resp, "Groq.chat")
                 resp.raise_for_status()
                 return resp.json()["choices"][0]["message"]["content"]
             except requests.HTTPError as exc:
@@ -130,8 +151,13 @@ class GroqClient:
         kwargs may include `temperature`, `max_tokens`, `tool_choice`, etc.
         but MAY NOT override `model`, `messages`, or `tools` (raises ValueError).
 
-        Retries ONLY on retryable statuses (429/5xx). 4xx (e.g., bad auth, malformed
+        Retries on retryable statuses (429/5xx). Most 4xx (e.g., bad auth, malformed
         tool schema) raises immediately — retrying won't help and burns time.
+
+        Special case: Groq returns HTTP 400 with `error.code == "tool_use_failed"`
+        when the model itself emits unparseable function-call syntax (e.g., raw
+        Python expressions as arguments). That IS retried on the same budget —
+        the next sample frequently parses cleanly.
         """
         _check_reserved_kwargs(kwargs)
         payload = {
@@ -165,14 +191,44 @@ class GroqClient:
                     for tc in raw_tool_calls
                 ]
                 return ToolResponse(content=content, tool_calls=tool_calls)
+            # Groq-specific: HTTP 400 with code='tool_use_failed' means the
+            # MODEL produced malformed function-call syntax (raw Python like
+            # `pint.Quantity(...)` in arguments, or multiple non-JSON
+            # `<function=...>` blocks in one message). The request itself
+            # is valid — Groq's server-side parser couldn't extract a
+            # function call from what the model emitted. Retrying is
+            # often productive because the model's next sample may parse
+            # cleanly, so treat this as a soft, retryable error (capped
+            # at MAX_ATTEMPTS like the other retryable statuses).
+            if (
+                response.status_code == 400
+                and self._is_tool_use_failed(response)
+                and attempt < self.MAX_ATTEMPTS - 1
+            ):
+                _log_http_error_body(response, "Groq.chat_with_tools (tool_use_failed, retrying)")
+                time.sleep(self._sleep_seconds(response, attempt))
+                continue
             # Only retry on retryable statuses; otherwise raise immediately.
             if response.status_code in _RETRYABLE_STATUS and attempt < self.MAX_ATTEMPTS - 1:
                 time.sleep(self._sleep_seconds(response, attempt))
                 continue
+            _log_http_error_body(response, "Groq.chat_with_tools")
             response.raise_for_status()
         # Loop exhausted on retryable status; raise final response's error.
         if last_response is not None:
+            _log_http_error_body(last_response, "Groq.chat_with_tools")
             last_response.raise_for_status()
+
+    @staticmethod
+    def _is_tool_use_failed(response) -> bool:
+        """True iff the response is Groq's `tool_use_failed` 400 (model
+        emitted unparseable function-call syntax). Safe on any response —
+        returns False for non-JSON bodies or any other error code."""
+        try:
+            err = response.json().get("error") or {}
+        except ValueError:
+            return False
+        return err.get("code") == "tool_use_failed"
 
 
 class GeminiClient:
@@ -247,6 +303,7 @@ class GeminiClient:
                 # leaks the key to logs/exceptions/results files. Sanitize first.
                 if "?key=" in resp.url or "&key=" in resp.url:
                     resp.url = resp.url.split("?")[0] + "?key=[REDACTED]"
+                _log_http_error_body(resp, "Gemini.chat")
                 resp.raise_for_status()
                 data = resp.json()
                 return data["candidates"][0]["content"]["parts"][0]["text"]
@@ -343,6 +400,8 @@ class GeminiClient:
             if response.status_code in _RETRYABLE_STATUS and attempt < self.MAX_ATTEMPTS - 1:
                 time.sleep(self._sleep_seconds(response, attempt))
                 continue
+            _log_http_error_body(response, "Gemini.chat_with_tools")
             response.raise_for_status()
         if last_response is not None:
+            _log_http_error_body(last_response, "Gemini.chat_with_tools")
             last_response.raise_for_status()
