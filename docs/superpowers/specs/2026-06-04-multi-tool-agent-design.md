@@ -342,6 +342,7 @@ Gemini does NOT issue tool-call IDs; the Gemini client synthesizes them as `f"ge
 | **Tool errors — network class** (Tavily 5xx, Wikipedia network blip) | Per-call exception RAISED by the tool | Retry up to 2× with same args (might succeed on retry). If still failing, surface as `Observation`; model decides next step. |
 | **Tool errors — deterministic class** (numexpr syntax error, pint UndefinedUnitError, datetime parse error) | Tool RETURNS an error STRING (no exception) | Single attempt. The error string IS the Observation; the model sees it and picks a different arg shape on the next step. Retrying with the same broken args is wasted Groq tokens — these errors don't fix themselves. |
 | **LLM errors** (rate limit 429, timeout, network blip) | API call exception | DA Agent's `LLMClient` handles this — 5 attempts with `Retry-After`-aware backoff. Direct reuse, no new code. |
+| **Provider tool-call parsing** (Groq `tool_use_failed` — model emitted malformed function-call syntax) | HTTP 400 with `error.code == "tool_use_failed"` | Retried on the same 5-attempt budget as 429/5xx. The next sample usually parses cleanly. See sub-section below. |
 | **Format errors** (model returns malformed tool_calls JSON) | Parse exception in `chat_with_tools()` | Re-prompt with format reminder (`"Your previous response had malformed JSON. Please use the tools= schema."`); counts toward step ceiling. Rare with function-calling. |
 
 #### Per-tool error convention (codified)
@@ -357,6 +358,20 @@ PR #4's code-quality review surfaced that the 5 tools split into two error-handl
 | `unit_convert` | RETURNS error string on undefined unit | Same — `pint.UndefinedUnitError` doesn't self-heal; model picks a different unit name |
 
 The PR #4 module docstrings already document this per-tool. The orchestrator should NOT wrap deterministic tools in additional try/except — they return their own error strings as valid string returns, which the orchestrator treats as Observations (not retries).
+
+#### Provider-side function-call parsing (`tool_use_failed`)
+
+Groq's chat completions API parses the model's emitted function-call syntax server-side. When the model produces malformed tool-call output — raw Python expressions as arguments (`pint.Quantity("100°C")` instead of valid JSON), multiple `<function=...>` blocks in one assistant turn, missing closing braces — Groq returns HTTP 400 with `error.code == "tool_use_failed"` rather than degrading silently to a text response.
+
+**This is a retryable error**, not a permanent failure. The next sample from the same model with the same messages frequently parses cleanly — the syntax error is a one-shot generation hiccup, not a structural problem with the request payload. (We verified this by cURLing the exact failing payloads and getting HTTP 200 back; the request shape is OpenAI-compliant.)
+
+`chat_with_tools()` treats `tool_use_failed` as part of the retryable class — same 5-attempt budget as 429/5xx, same `Retry-After`-aware backoff. Other 4xx codes (bad auth, invalid schema) still raise immediately. The classifier (`_is_tool_use_failed`) is precise: it requires both `status_code == 400` AND `error.code == "tool_use_failed"` from the parsed response body. A 401 with `code == "invalid_api_key"` is correctly NOT retried — confirmed by `test_groq_400_non_tool_use_failed_raises_immediately`.
+
+#### Diagnostic logging — `_log_http_error_body`
+
+Before any 4xx/5xx response is raised, `_log_http_error_body(response, label)` prints `[llm_client] {label} HTTP {status}: {response.text[:2000]}` to stderr. This was added after the initial eval surfaced 9 inscrutable HTTPError crashes — `raise_for_status()` discards the provider's JSON error body, so the actual `tool_use_failed` cause was hidden until we instrumented the request. It's a permanent diagnostic; we don't want to lose visibility into provider rejections again.
+
+The body is truncated to 2000 chars (Groq error bodies are small, but Tavily/Wikipedia responses can be large), routed to stderr so it doesn't corrupt structured stdout output, and wrapped in try/except returning `<unreadable body>` for non-text payloads.
 
 #### Repeated-failed-call loop — decision
 
@@ -670,7 +685,5 @@ this audit.
 | 2026-06-08 | §3.10 (demo) | Spec said "5-6" example queries; demo ships 7. | Range relaxed to "5-7". |
 | 2026-06-08 | §3.10.1 (CLI) | Spec described only `--provider {groq,gemini}`; reality has `--model`, `--trace`, `-v/--verbose` too. | New §3.10.1 with full flag table + exit code table. |
 | 2026-06-08 | §3.10.1 (CLI) | `--trace PATH` directory semantics (always treated as directory; created if missing) was unspecified. | Documented as "Trace directory semantics" paragraph; rationale references PR #8's fix-up commit. |
-
-Drifts considered and intentionally NOT applied:
-- **Groq `tool_use_failed` retry (§3.6).** PR #10 introduced retry-on-HTTP-400 for `error.code == "tool_use_failed"`; PRs #12/#13 reverted both the code change and its doc. The current spec's "4xx raises immediately" matches the current code, so no edit is needed. If the fix lands again, this section needs the retryable-error-class paragraph the original audit brief described.
-- **`_log_http_error_body` diagnostic (§3.6).** Same provenance — landed in PR #10's branch and was reverted alongside the retry. Not in the codebase today.
+| 2026-06-08 | §3.6 (error handling) | Groq `tool_use_failed` retry not documented. Originally deferred at audit time because PRs #12/#13 had reverted the fix; PR #17 restored it (reverts were accidental). | New sub-section "Provider-side function-call parsing (`tool_use_failed`)" added; new row in the 3-tier error table. |
+| 2026-06-08 | §3.6 (error handling) | `_log_http_error_body` diagnostic not documented. Same provenance — restored via PR #17. | New sub-section "Diagnostic logging — `_log_http_error_body`" added. |
