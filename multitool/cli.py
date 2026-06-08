@@ -165,6 +165,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     catch SystemExit. ``sys.exit()`` is only called via argparse's own
     error path (unknown subcommand, missing positional arg → exit code 2).
     """
+    # Auto-load .env BEFORE any env-reading happens (e.g. GROQ_API_KEY in
+    # _run_agent). No-op if no .env exists; never overrides real env vars.
+    from multitool._env import load_project_env
+    load_project_env()
+
     parser = _build_parser()
     args = parser.parse_args(argv)  # SystemExit(2) on parse error
 

@@ -37,3 +37,18 @@ def _isolate_tool_registry():
     yield
     TOOL_REGISTRY.clear()
     TOOL_REGISTRY.update(before)
+
+
+@pytest.fixture(autouse=True)
+def _stub_load_project_env(monkeypatch):
+    """Stub multitool._env.load_project_env to a no-op for the entire test suite.
+
+    cli.main() and eval/run.main() call load_project_env() at entry to
+    auto-load .env from the project root. During tests this would side-load
+    real env vars (e.g. a developer's GROQ_API_KEY in repo-root .env) and
+    sabotage tests that intentionally delenv() those vars to exercise the
+    "missing API key" code paths. Stub it globally so tests get a clean
+    environment regardless of what's in the repo's .env.
+    """
+    from multitool import _env
+    monkeypatch.setattr(_env, "load_project_env", lambda: None)

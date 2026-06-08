@@ -102,6 +102,11 @@ def run_eval(
 
 def main():
     """CLI entrypoint: python -m multitool.eval.run --test-set X --results Y"""
+    # Auto-load .env BEFORE any env-reading (e.g. GROQ_API_KEY in factory()).
+    # No-op if no .env exists; never overrides real env vars.
+    from multitool._env import load_project_env
+    load_project_env()
+
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--test-set", default="multitool/eval/test_set.jsonl")
