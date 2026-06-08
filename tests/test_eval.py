@@ -1,5 +1,4 @@
 """Tests for the eval scorer + JSONL loader."""
-import pytest
 
 
 class TestParseNumber:

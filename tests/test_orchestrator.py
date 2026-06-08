@@ -1,5 +1,4 @@
 """Tests for the orchestrator agent loop."""
-import pytest
 
 
 class TestOrchestratorSkeleton:

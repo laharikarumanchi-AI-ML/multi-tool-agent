@@ -2,7 +2,7 @@
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from multitool.llm_client import LLMClient, ToolCall, ToolResponse
+from multitool.llm_client import LLMClient, ToolCall
 from multitool.tools import TOOL_REGISTRY
 from multitool.trace import Trace
 
